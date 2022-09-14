@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "s3bCommon": {
+      "commandName": "Project",
+      "commandLineArgs": "C:\\backup\\PK2\\data\\src\\softlap1\\Personal knet_archive"
+    }
+  }
+}
