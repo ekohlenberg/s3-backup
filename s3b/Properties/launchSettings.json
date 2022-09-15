@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "s3b": {
+      "commandName": "Project",
+      "commandLineArgs": "C:\\backup\\test-files knet-archive-bucket-test"
+    }
+  }
+}
