@@ -254,9 +254,10 @@ namespace s3b
 
             retCode = exec("archive.command", "archive.args", cmdParams);
 
-            /*
+            
             if (fldr.recurse)
             {
+                cmdParams["localobject"] = fldr.folder_path;
                 retCode = exec("archive.command", "archive.args", cmdParams);
             }
             else
@@ -264,11 +265,14 @@ namespace s3b
                 foreach (LocalFile f in fldr.files)
                 {
                     f.getStdParams(cmdParams);
+                    cmdParams["localfile"] = f.full_path;
+                    cmdParams["localobject"] = f.full_path;
+
                     int execCode = exec("archive.command", "archive.args", cmdParams);
                     if (execCode == 1) retCode = 1;
                 }
             }
-           */
+           
 
             string completion = "complete";
             if (retCode != 0) completion = "error";
@@ -364,7 +368,8 @@ namespace s3b
 
             Model cmdParams = getStdParms(fldr);
             
-           // clean("archive.clean", cmdParams);
+           //  clean("archive.clean", cmdParams); // not necessary as gzip removes source fuke
+            
             clean("compress.clean", cmdParams);
             clean("encrypt.clean", cmdParams);
 
