@@ -7,6 +7,8 @@ namespace s3b
     class Program
     {
         static PersistBase persist = null;
+        static Model cmdParams = null;
+
         public class UsageException : Exception
         {
             public UsageException(string message) : base(message + "\ns3b <backup_folder> <s3_bucket>\n")
@@ -25,6 +27,7 @@ namespace s3b
 
             try
             {
+                Logger.info("starting...");
                 persist.execCmd("delete from message_log");
 
                 BackupSet bset = parse(args);
@@ -40,6 +43,8 @@ namespace s3b
                 newer(bset);
 
                 process(bset);
+
+                Logger.info("complete.");
 
             }
             catch( Exception e)
@@ -65,6 +70,32 @@ namespace s3b
             bset.upload_target = args[1];
 
             return bset;
+        }
+
+        private static Model getParameters(LocalFolder fldr)
+        {
+            if (cmdParams == null)
+            {
+                cmdParams = new Model();
+                copySettings();
+            }
+            
+            cmdParams["localfolder"] = fldr.folder_path;
+            cmdParams["localfile"] = fldr.folder_path + "\\*";
+            cmdParams["archive.name"] = fldr.getArchiveName();
+            cmdParams["temp"] = Config.getString("s3b.temp");
+            cmdParams["bucket"] = fldr.backupSet.upload_target;
+            return cmdParams;
+        }
+
+        private static void copySettings()
+        {
+            Dictionary<string, string> settings = Config.getSettings();
+
+            foreach (string k in settings.Keys)
+            {
+                cmdParams[k] = settings[k];
+            }
         }
 
         // update all prev timestamp to the current timestemp (the last timestamp from the prev run)
@@ -248,13 +279,11 @@ namespace s3b
             Logger.info("archiving: " + fldr.folder_path);
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
-            Model cmdParams = getStdParms(fldr);
+            Model cmdParams = getParameters(fldr);
 
             int retCode = 0;
 
-            retCode = exec("archive.command", "archive.args", cmdParams);
-
-            
+                       
             if (fldr.recurse)
             {
                 cmdParams["localobject"] = fldr.folder_path;
@@ -289,7 +318,7 @@ namespace s3b
             Logger.info("compressing: " + fldr.folder_path);
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
-            Model cmdParams = getStdParms(fldr);
+            Model cmdParams = getParameters(fldr);
 
             int retCode = exec("compress.command", "compress.args", cmdParams);
             string completion = "complete";
@@ -309,14 +338,29 @@ namespace s3b
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
 
-            Model cmdParams = getStdParms(fldr);
+            Model cmdParams = getParameters(fldr);
 
-            //cmdParams["passfile"] = Config.getString("encrypt.passfile");
-            cmdParams["passfile"] = System.Environment.GetEnvironmentVariable("S3B-PASSFILE");
+            string passfile = System.Environment.GetEnvironmentVariable("S3B-PASSFILE");
+            cmdParams["passfile"] = passfile;
 
             int retCode = exec("encrypt.command", "encrypt.args", cmdParams);
             string completion = "complete";
-            if (retCode != 0) completion = "error";
+            if (retCode == 0)
+            {
+                Template t = new Template(cmdParams["encrypt.clean"].ToString());
+                FileInfo fi = new FileInfo(t.eval(cmdParams));
+
+                t.setScript(cmdParams["encrypt.target"].ToString());
+
+                fldr.encrypted_file_name = t.eval(cmdParams);
+                fldr.encrypted_file_size = fi.Length;
+
+                persist.update(fldr);
+            }
+            else
+            {
+                completion = "error";
+            }
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
         }
@@ -329,7 +373,7 @@ namespace s3b
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
 
-            Model cmdParams = getStdParms(fldr);
+            Model cmdParams = getParameters(fldr);
 
             //cmdParams["uploadtarget"] = Config.getString("upload.target");
             cmdParams["uploadtarget"] = fldr.backupSet.upload_target;
@@ -340,16 +384,7 @@ namespace s3b
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
         }
 
-        private static Model getStdParms(LocalFolder fldr)
-        {
-            Model cmdParams = new Model();
-            cmdParams["localfolder"] = fldr.folder_path;
-            cmdParams["localfile"] = fldr.folder_path + "\\*";
-            cmdParams["archivetarget"] = fldr.getArchiveTarget();
-            cmdParams["temp"] = Config.getString("s3b.temp");
-            cmdParams["bucket"] = fldr.backupSet.upload_target;
-            return cmdParams;
-        }
+        
 
         static int exec(string configCmdName, string configArgName, Model cmdParams)
         {
@@ -366,13 +401,14 @@ namespace s3b
         {
             Logger.info("cleaning temp files: " + fldr.folder_path);
 
-            Model cmdParams = getStdParms(fldr);
+            Model cmdParams = getParameters(fldr);
             
            //  clean("archive.clean", cmdParams); // not necessary as gzip removes source fuke
+
             
             clean("compress.clean", cmdParams);
             clean("encrypt.clean", cmdParams);
-
+            
             
             string completion = "complete";
             

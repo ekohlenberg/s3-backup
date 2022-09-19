@@ -35,5 +35,24 @@ namespace s3b
 
             return Convert.ToInt32(section[param]);
         }
+
+        static public Dictionary<string, string> getSettings()
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>();
+
+            IConfigurationSection section = getConfigBuilder().GetSection("appsettings");
+
+            
+            foreach ( var c in section.GetChildren())
+            {
+                string k = c.Key;
+                string v = getString(k);
+
+                result.Add(k, v);
+            }
+
+            return result;
+
+        }
     }
 }

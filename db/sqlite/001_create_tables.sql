@@ -20,7 +20,9 @@ backup_set_id integer,
 folder_path text,
 stage text,
 status text,
-last_error text
+last_error text,
+encrypted_file_name text,
+encrypted_file_size integer
 );
 
 create table local_file

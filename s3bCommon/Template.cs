@@ -11,9 +11,23 @@ namespace s3b{
         {
             this.script = script;
         }
+
+        public void setScript( string script)
+        {
+            this.script = script;
+        }
+
         public string eval(Model parameters)
         {
             StringBuilder sb = new StringBuilder(script);
+            eval(parameters, sb);
+
+            return sb.ToString();
+        }
+
+        private void eval(Model parameters, StringBuilder sb)
+        {
+            string initialStr = sb.ToString();
 
             foreach (string k in parameters.Keys)
             {
@@ -24,7 +38,10 @@ namespace s3b{
                 sb.Replace(paramName, v.ToString());
             }
 
-            return sb.ToString();
+            string finalStr = sb.ToString();
+
+            if (finalStr != initialStr) eval(parameters, sb); 
+                        
         }
     }
 }
