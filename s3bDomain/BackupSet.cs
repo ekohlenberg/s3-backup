@@ -15,7 +15,22 @@ namespace s3b
         
         public List<LocalFolder> workFolders = new List<LocalFolder>();
         public Dictionary<long, LocalFolder> localFolders = new Dictionary<long, LocalFolder>();
+        private Dictionary<string, LocalFolder> _uploadedFolders = new Dictionary<string, LocalFolder>();
 
+        public Dictionary<string, LocalFolder> getUploadedFolders()
+        {
+            _uploadedFolders.Clear();
+
+            foreach( LocalFolder fldr in localFolders.Values)
+            {
+                if (!_uploadedFolders.ContainsKey( fldr.encrypted_file_name ))
+                {
+                    _uploadedFolders.Add(fldr.encrypted_file_name, fldr);
+                }
+            }
+
+            return _uploadedFolders;
+        }
 
         public long id
         {

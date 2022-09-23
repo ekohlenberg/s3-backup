@@ -67,6 +67,10 @@ namespace s3b
             recurse = true;
 
             files = new List<LocalFile>();
+
+            encrypted_file_name = "";
+            encrypted_file_size = 0;
+            upload_datetime = DateTime.Now;
         }
 
         public long id
@@ -165,7 +169,20 @@ namespace s3b
                 setPropValue(MethodBase.GetCurrentMethod().Name, value);
             }
         }
-        public string getArchiveName()
+
+        public DateTime upload_datetime
+        {
+            get
+            {
+                return Convert.ToDateTime(getPropValue(MethodBase.GetCurrentMethod().Name));
+            }
+            set
+            {
+                setPropValue(MethodBase.GetCurrentMethod().Name, value);
+            }
+        }
+
+public string getArchiveName()
         {
             StringBuilder archiveName = new StringBuilder(System.Environment.MachineName);
             archiveName.Append("_");

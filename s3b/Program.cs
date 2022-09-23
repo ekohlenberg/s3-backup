@@ -7,7 +7,12 @@ namespace s3b
     class Program
     {
         static PersistBase persist = null;
-        static Model cmdParams = null;
+        static Model _cmdParams = null;
+
+        static string bucket = string.Empty;
+        static string backup_folder = string.Empty;
+
+        static int maxRetry = 3;
 
         public class UsageException : Exception
         {
@@ -20,6 +25,7 @@ namespace s3b
         static int Main(string[] args)
         {
             int retcode = 0;
+            int retry = 0;
             persist = new SqlitePersist(new s3bSqliteTemplate());
             Logger.Persist = persist;
 
@@ -42,10 +48,20 @@ namespace s3b
 
                 newer(bset);
 
-                process(bset);
+                recon(bset);
+
+                do
+                {
+                    process(bset);
+                }
+                while (!recon(bset) && (retry++ < maxRetry));
 
                 Logger.info("complete.");
 
+            }
+            catch( UsageException u)
+            {
+                Logger.info(u.Message);
             }
             catch( Exception e)
             {
@@ -62,30 +78,42 @@ namespace s3b
             BackupSet bset = new BackupSet();
 
             bset.root_folder_path = args[0];
+            backup_folder = args[0];
 
             bset.root_folder_path = Path.GetFullPath(bset.root_folder_path);
 
             if (!Directory.Exists(bset.root_folder_path)) throw new UsageException("Folder " + bset.root_folder_path + " does not exist.");
 
             bset.upload_target = args[1];
+            bucket = args[1];
 
             return bset;
         }
 
         private static Model getParameters(LocalFolder fldr)
         {
-            if (cmdParams == null)
+            getParameters();
+
+            _cmdParams["localfolder"] = fldr.folder_path;
+            _cmdParams["localfile"] = fldr.folder_path + "\\*";
+            _cmdParams["archive.name"] = fldr.getArchiveName();
+
+            
+            return _cmdParams;
+        }
+
+        private static Model getParameters()
+        {
+            if (_cmdParams == null)
             {
-                cmdParams = new Model();
+                _cmdParams = new Model();
                 copySettings();
             }
-            
-            cmdParams["localfolder"] = fldr.folder_path;
-            cmdParams["localfile"] = fldr.folder_path + "\\*";
-            cmdParams["archive.name"] = fldr.getArchiveName();
-            cmdParams["temp"] = Config.getString("s3b.temp");
-            cmdParams["bucket"] = fldr.backupSet.upload_target;
-            return cmdParams;
+            _cmdParams["temp"] = Config.getString("s3b.temp");
+            _cmdParams["bucket"] = bucket;
+            _cmdParams["backup_folder"] = backup_folder;
+
+            return _cmdParams;
         }
 
         private static void copySettings()
@@ -94,7 +122,7 @@ namespace s3b
 
             foreach (string k in settings.Keys)
             {
-                cmdParams[k] = settings[k];
+                _cmdParams[k] = settings[k];
             }
         }
 
@@ -380,22 +408,102 @@ namespace s3b
 
             string completion = "complete";
             if (exec("upload.command", "upload.args", cmdParams) != 0) completion = "error";
+
+            fldr.upload_datetime = DateTime.Now;
+            persist.update(fldr);
             
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
         }
 
-        
+
+        static bool recon(BackupSet bset)
+        {
+            bool result = true;
+            if (!isStepEnabled("recon")) return result;
+
+            Logger.info("reconciling...");
+
+            Model cmdParams = getParameters();
+
+            List<string> stdout;
+            List<string> stderr;
+
+            exec("recon.command", "recon.args", cmdParams, out stdout, out stderr);
+
+            Template t = new Template(cmdParams["recon.output"].ToString());
+            string reconFile = t.eval(cmdParams);
+
+            if (!File.Exists(reconFile)) throw new Exception("recon file " + reconFile + " missing");
+
+            Dictionary<string, LocalFolder> uploadedFolders = bset.getUploadedFolders();
+
+            foreach (string line in stdout)
+            {
+                // date
+                // time
+                // size
+                // name
+                if (line == null) continue;
+                if (line.Trim().Length == 0) continue;
+
+                string[] parts = line.Split(new char[] { ' ' },StringSplitOptions.RemoveEmptyEntries);
+
+                if (parts.Length != 4) continue;
+
+                DateTime uploadDateTime;
+                DateTime.TryParse(parts[0] + " " + parts[1], out uploadDateTime);
+
+                int encryptedFileSize = 0;
+                Int32.TryParse(parts[2], out encryptedFileSize);
+
+                string encryptedFileName = parts[3];
+
+                if (uploadedFolders.ContainsKey(encryptedFileName))
+                {
+                    LocalFolder fldr = uploadedFolders[encryptedFileName];
+
+                    Logger.info("checking " + encryptedFileName);
+
+                    if (encryptedFileSize == fldr.encrypted_file_size)
+                    {
+                        Logger.info("encrypted file size ok");
+                    }
+                    else
+                    {
+                        updateStatus(fldr, "archive", "new");
+                        Logger.error(fldr.folder_path + " size does not match uploaded " + encryptedFileName);
+                        result = false;
+                    }
+                }
+
+            }
+
+            return result;
+        }
 
         static int exec(string configCmdName, string configArgName, Model cmdParams)
+        {
+            List<string> stdout;
+            List<string> stderr;
+           
+            
+            int result = exec(configCmdName, configArgName, cmdParams, out stdout, out stderr);
+
+            return result;
+        }
+
+        private static int exec(string configCmdName, string configArgName, Model cmdParams, out List<string> stdout, out List<string> stderr)
         {
             string cmd = Config.getString(configCmdName);
             string args = Config.getString(configArgName);
             ProcExec pe = new ProcExec(cmd, args);
+            int result = pe.run(cmdParams);
 
+            stdout = pe.stdout;
+            stderr = pe.stderr;
 
-            return pe.run(cmdParams);
+            return result;
         }
-
 
         static void clean( LocalFolder fldr)
         {

@@ -171,6 +171,11 @@ namespace s3b
         {
             string result = string.Empty;
 
+            if (v == null)
+            {
+                v = string.Empty;
+            }
+
             if (v.GetType().Equals(typeof(DateTime)))
             {
                 DateTime d = (DateTime)v;

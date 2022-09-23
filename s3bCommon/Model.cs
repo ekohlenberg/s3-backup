@@ -14,11 +14,25 @@ namespace s3b
         protected object getPropValue(string propName)
         {
             propName = propName.Replace("get_", "").Replace("set_", "");
-            return this[propName];
+            object o;
+            try
+            {
+                o = this[propName];
+            }
+            catch(KeyNotFoundException)
+            {
+                o = new object();
+            }
+            return o;
         }
 
         protected void setPropValue(string propName, object value)
         {
+            if (value == null)
+            {
+                value = string.Empty;
+            }
+
             //propName = propName.Replace("get_", "").Replace("set_", "");
             propName = propName.Substring(4);
             if (this.ContainsKey(propName))
