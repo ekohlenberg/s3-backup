@@ -143,7 +143,7 @@ namespace s3b
             
             foreach( string k in model.Keys)
             {
-                if (k != "id")
+                if ((k != "id") && (model.isDirty(k)))
                 {
                     if (expressions.Length > 0)
                     {

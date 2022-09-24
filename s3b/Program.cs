@@ -158,6 +158,7 @@ namespace s3b
                 fldr.folder_path = d;
                 persist.put(fldr, "folder_path");
                 bset.localFolders.Add(fldr.id,fldr);
+                persist.get(fldr);
             }
 
             fldr = new LocalFolder();
@@ -166,6 +167,7 @@ namespace s3b
             fldr.recurse = false;
             persist.put(fldr, "folder_path");
             bset.localFolders.Add(fldr.id, fldr);
+            persist.get(fldr);
         }
 
         delegate void FileCallback(string filename);
@@ -430,11 +432,6 @@ namespace s3b
 
             exec("recon.command", "recon.args", cmdParams, out stdout, out stderr);
 
-            Template t = new Template(cmdParams["recon.output"].ToString());
-            string reconFile = t.eval(cmdParams);
-
-            if (!File.Exists(reconFile)) throw new Exception("recon file " + reconFile + " missing");
-
             Dictionary<string, LocalFolder> uploadedFolders = bset.getUploadedFolders();
 
             foreach (string line in stdout)
@@ -470,10 +467,14 @@ namespace s3b
                     }
                     else
                     {
-                        updateStatus(fldr, "archive", "new");
+                        updateStatus(fldr, "new", "none");
                         Logger.error(fldr.folder_path + " size does not match uploaded " + encryptedFileName);
                         result = false;
                     }
+                }
+                else
+                {
+                    Logger.info(encryptedFileName + " not found. skipping.");
                 }
 
             }

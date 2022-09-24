@@ -10,6 +10,8 @@ namespace s3b
 
         public string tableName { get; set; }
 
+        protected Dictionary<string, bool> dirty = new Dictionary<string, bool>();
+
         // this is in a base class, skipped that bit for clairty
         protected object getPropValue(string propName)
         {
@@ -43,6 +45,18 @@ namespace s3b
             {
                 this.Add(propName, value);
             }
+
+            if (!dirty.ContainsKey(propName))  dirty.Add(propName, true);
+        }
+
+        public void clearDirty()
+        {
+            dirty.Clear();
+        }
+
+        public bool isDirty(string propName)
+        {
+            return dirty.ContainsKey(propName);
         }
     }
 }

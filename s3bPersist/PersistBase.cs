@@ -89,13 +89,14 @@ namespace s3b
         {
             string sql = updateSql(model);
             execCmd(sql);
+            model.clearDirty();
         }
 
         public virtual void put(Model model, string rwkCol)
         {
             string sql = "select * from $(tableName) where $(rwkCol) = $(rwkValue)";
             bool found = false;
-
+            
             Model filter = new Model();
             filter["tableName"] = model.tableName;
             filter["rwkCol"] = rwkCol;
