@@ -67,5 +67,17 @@ namespace s3b
             }
         }
 
+        public DateTime last_backup_datetime
+        {
+            get
+            {
+                return Convert.ToDateTime(getPropValue(MethodBase.GetCurrentMethod().Name));
+            }
+            set
+            {
+                setPropValue(MethodBase.GetCurrentMethod().Name, value);
+            }
+        }
+
     }
 }

@@ -56,12 +56,16 @@ namespace s3b
                 }
                 while (!recon(bset) && (retry++ < maxRetry));
 
+                bset.last_backup_datetime = DateTime.Now;
+                persist.update(bset);
+
                 Logger.info("complete.");
 
             }
             catch( UsageException u)
             {
                 Logger.info(u.Message);
+                retcode = 1;
             }
             catch( Exception e)
             {
