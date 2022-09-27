@@ -5,19 +5,14 @@ using System.Text;
 namespace s3b{
     public class Template
     {
-        string script = string.Empty;
+        
 
-        public Template(string script)
+        public Template()
         {
-            this.script = script;
         }
 
-        public void setScript( string script)
-        {
-            this.script = script;
-        }
-
-        public string eval(Model parameters)
+        
+        public string eval(string script, Model parameters)
         {
             StringBuilder sb = new StringBuilder(script);
             eval(parameters, sb);

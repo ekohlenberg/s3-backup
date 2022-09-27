@@ -24,7 +24,7 @@ namespace s3b
             ProcessStartInfo processStartInfo;
             Process process;
 
-            Template template = new Template(argTemplate);
+            Template template = new Template();
 
             
             processStartInfo = new ProcessStartInfo();
@@ -33,7 +33,7 @@ namespace s3b
             processStartInfo.RedirectStandardError = false;
             processStartInfo.RedirectStandardInput = false;
             processStartInfo.UseShellExecute = false;
-            processStartInfo.Arguments = template.eval(parameters);
+            processStartInfo.Arguments = template.eval(argTemplate, parameters);
             processStartInfo.FileName = cmd;
 
             Logger.info(cmd + " " + processStartInfo.Arguments);

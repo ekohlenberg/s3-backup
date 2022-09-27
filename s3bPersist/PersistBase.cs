@@ -51,8 +51,8 @@ namespace s3b
 
         protected string substituteTemplate(Model parameters, string sqlTemplate)
         {
-            Template t = new Template(sqlTemplate);
-            return t.eval(parameters);
+            Template t = new Template();
+            return t.eval(sqlTemplate, parameters);
         }
 
         protected string getSql(Model t)
