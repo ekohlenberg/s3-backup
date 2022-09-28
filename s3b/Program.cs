@@ -139,23 +139,37 @@ namespace s3b
 
             LocalFolder fldr;
 
-            foreach ( string d in dirs)
+            foreach (string d in dirs)
             {
-                fldr = new LocalFolder();
-                fldr.backup_set_id = bset.id;
-                fldr.folder_path = d;
-                persist.put(fldr, "folder_path");
-                bset.localFolders.Add(fldr.id,fldr);
-                persist.get(fldr);
+                fldr = addChildFolder(bset, d);
             }
 
-            fldr = new LocalFolder();
+            fldr = addRootFolder(bset);
+        }
+
+        private static LocalFolder addRootFolder(BackupSet bset)
+        {
+            LocalFolder fldr = new LocalFolder();
             fldr.backup_set_id = bset.id;
             fldr.folder_path = bset.root_folder_path;
             fldr.recurse = false;
             persist.put(fldr, "folder_path");
             bset.localFolders.Add(fldr.id, fldr);
+            fldr.backupSet = bset;
             persist.get(fldr);
+            return fldr;
+        }
+
+        private static LocalFolder addChildFolder(BackupSet bset, string d)
+        {
+            LocalFolder fldr = new LocalFolder();
+            fldr.backup_set_id = bset.id;
+            fldr.folder_path = d;
+            persist.put(fldr, "folder_path");
+            bset.localFolders.Add(fldr.id, fldr);
+            fldr.backupSet = bset;
+            persist.get(fldr);
+            return fldr;
         }
 
         delegate void FileCallback(string filename);
@@ -447,6 +461,10 @@ namespace s3b
                     else
                     {
                         updateStatus(fldr, "new", "none");
+                        if (!bset.workFolders.Contains(fldr))
+                        {
+                            bset.workFolders.Add(fldr);
+                        }
                         Logger.error(fldr.folder_path + " size does not match uploaded " + encryptedFileName);
                         result = false;
                     }
