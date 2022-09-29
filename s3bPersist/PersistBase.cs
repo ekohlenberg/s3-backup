@@ -51,8 +51,8 @@ namespace s3b
 
         protected string substituteTemplate(Model parameters, string sqlTemplate)
         {
-            Template t = new Template(sqlTemplate);
-            return t.eval(parameters);
+            Template t = new Template();
+            return t.eval(sqlTemplate, parameters);
         }
 
         protected string getSql(Model t)
@@ -89,13 +89,14 @@ namespace s3b
         {
             string sql = updateSql(model);
             execCmd(sql);
+            model.clearDirty();
         }
 
         public virtual void put(Model model, string rwkCol)
         {
             string sql = "select * from $(tableName) where $(rwkCol) = $(rwkValue)";
             bool found = false;
-
+            
             Model filter = new Model();
             filter["tableName"] = model.tableName;
             filter["rwkCol"] = rwkCol;

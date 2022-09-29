@@ -143,7 +143,7 @@ namespace s3b
             
             foreach( string k in model.Keys)
             {
-                if (k != "id")
+                if ((k != "id") && (model.isDirty(k)))
                 {
                     if (expressions.Length > 0)
                     {
@@ -170,6 +170,11 @@ namespace s3b
         protected override string toSql( object v)
         {
             string result = string.Empty;
+
+            if (v == null)
+            {
+                v = string.Empty;
+            }
 
             if (v.GetType().Equals(typeof(DateTime)))
             {

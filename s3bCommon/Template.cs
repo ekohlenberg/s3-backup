@@ -5,15 +5,24 @@ using System.Text;
 namespace s3b{
     public class Template
     {
-        string script = string.Empty;
+        
 
-        public Template(string script)
+        public Template()
         {
-            this.script = script;
         }
-        public string eval(Model parameters)
+
+        
+        public string eval(string script, Model parameters)
         {
             StringBuilder sb = new StringBuilder(script);
+            eval(parameters, sb);
+
+            return sb.ToString();
+        }
+
+        private void eval(Model parameters, StringBuilder sb)
+        {
+            string initialStr = sb.ToString();
 
             foreach (string k in parameters.Keys)
             {
@@ -24,7 +33,10 @@ namespace s3b{
                 sb.Replace(paramName, v.ToString());
             }
 
-            return sb.ToString();
+            string finalStr = sb.ToString();
+
+            if (finalStr != initialStr) eval(parameters, sb); 
+                        
         }
     }
 }

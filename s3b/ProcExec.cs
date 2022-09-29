@@ -10,8 +10,8 @@ namespace s3b
         string cmd = string.Empty;
         string argTemplate = string.Empty;
 
-        public string stdout = string.Empty;
-        public string stderr = string.Empty;
+        public List<string> stdout = new List<string>();
+        public List<string> stderr = new List<string>();
 
         public ProcExec(string cmd, string argTemplate)
         {
@@ -20,23 +20,20 @@ namespace s3b
         }
         public int run(Model parameters)
         {
-            StringBuilder outputBuilder;
-            StringBuilder errorBuilder;
+            
             ProcessStartInfo processStartInfo;
             Process process;
 
-            Template template = new Template(argTemplate);
+            Template template = new Template();
 
-            outputBuilder = new StringBuilder();
-            errorBuilder = new StringBuilder();
-
+            
             processStartInfo = new ProcessStartInfo();
             processStartInfo.CreateNoWindow = true;
-            processStartInfo.RedirectStandardOutput = false;
+            processStartInfo.RedirectStandardOutput = true;
             processStartInfo.RedirectStandardError = false;
             processStartInfo.RedirectStandardInput = false;
-            processStartInfo.UseShellExecute = true;
-            processStartInfo.Arguments = template.eval(parameters);
+            processStartInfo.UseShellExecute = false;
+            processStartInfo.Arguments = template.eval(argTemplate, parameters);
             processStartInfo.FileName = cmd;
 
             Logger.info(cmd + " " + processStartInfo.Arguments);
@@ -51,8 +48,9 @@ namespace s3b
                 delegate (object sender, DataReceivedEventArgs e)
                 {
                     // append the new data to the data already read-in
-                    outputBuilder.Append(e.Data);
-                    Console.Write(e.Data);
+                    
+                    stdout.Add(e.Data);                    
+                    Console.WriteLine(e.Data);
                 }
             );
 
@@ -61,8 +59,9 @@ namespace s3b
                 delegate (object sender, DataReceivedEventArgs e)
                 {
                     // append the new data to the data already read-in
-                    errorBuilder.Append(e.Data);
-                    Console.Write(e.Data);
+                    stderr.Add(e.Data);
+                    
+                    Console.WriteLine(e.Data);
                 }
             );
             // start the process
@@ -70,15 +69,15 @@ namespace s3b
             // then wait for the process to exit
             // then cancel asynchronously reading the output
             process.Start();
-            //process.BeginOutputReadLine();
+            process.BeginOutputReadLine();
             process.WaitForExit();
-           // process.CancelOutputRead();
+            process.CancelOutputRead();
             
             // use the output
-            stdout = outputBuilder.ToString();
-            if (stdout.Length > 0) Logger.info(stdout);
-            stderr = errorBuilder.ToString();
-            if (stderr.Length > 0) Logger.error(stdout);
+            
+            if (stdout.Count > 0) Logger.info(stdout);
+            
+            if (stderr.Count > 0) Logger.error(stdout);
 
             return process.ExitCode;
         }

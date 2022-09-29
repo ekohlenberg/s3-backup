@@ -67,6 +67,12 @@ namespace s3b
             recurse = true;
 
             files = new List<LocalFile>();
+
+            encrypted_file_name = "";
+            encrypted_file_size = 0;
+            upload_datetime = DateTime.Now;
+
+            clearDirty();
         }
 
         public long id
@@ -142,18 +148,55 @@ namespace s3b
             }
         }
 
-        public string getArchiveTarget()
+        public string encrypted_file_name
         {
-            StringBuilder archiveTarget = new StringBuilder(System.Environment.MachineName);
-            archiveTarget.Append("_");
-            archiveTarget.Append(System.Environment.UserName);
-            archiveTarget.Append("_");
-            archiveTarget.Append(folder_path);
-            archiveTarget.Replace('\\', '_');
-            archiveTarget.Replace(":", "");
-            archiveTarget.Replace(" ", "_");
+            get
+            {
+                return getPropValue(MethodBase.GetCurrentMethod().Name).ToString();
+            }
+            set
+            {
+                setPropValue(MethodBase.GetCurrentMethod().Name, value);
+            }
+        }
 
-            return archiveTarget.ToString();
+        public long encrypted_file_size
+        {
+            get
+            {
+                return Convert.ToInt32(getPropValue(MethodBase.GetCurrentMethod().Name));
+            }
+            set
+            {
+                setPropValue(MethodBase.GetCurrentMethod().Name, value);
+            }
+        }
+
+        public DateTime upload_datetime
+        {
+            get
+            {
+                return Convert.ToDateTime(getPropValue(MethodBase.GetCurrentMethod().Name));
+            }
+            set
+            {
+                setPropValue(MethodBase.GetCurrentMethod().Name, value);
+            }
+        }
+
+public string getArchiveName()
+        {
+            StringBuilder archiveName = new StringBuilder(System.Environment.MachineName);
+            archiveName.Append("_");
+            archiveName.Append(System.Environment.UserName);
+            archiveName.Append("_");
+            archiveName.Append(folder_path);
+            archiveName.Replace('\\', '_');
+            archiveName.Replace('/', '_');
+            archiveName.Replace(":", "");
+            archiveName.Replace(" ", "_");
+
+            return archiveName.ToString();
         }
     }
 }

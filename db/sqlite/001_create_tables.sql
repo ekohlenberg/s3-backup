@@ -10,7 +10,8 @@ create table backup_set
 (
 id integer primary key autoincrement, 
 root_folder_path text,
-upload_target text
+upload_target text,
+last_backup_datetime
 );
 
 create table local_folder
@@ -20,7 +21,10 @@ backup_set_id integer,
 folder_path text,
 stage text,
 status text,
-last_error text
+last_error text,
+encrypted_file_name text,
+encrypted_file_size integer,
+upload_datetime datetime
 );
 
 create table local_file

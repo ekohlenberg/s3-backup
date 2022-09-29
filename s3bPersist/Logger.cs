@@ -33,6 +33,13 @@ namespace s3b
             log("error", msg);
         }
 
+        public static void error(List<string> L)
+        {
+            foreach (string s in L)
+            {
+                error(s);
+            }
+        }
         public static void error(Exception x)
         {
             log("error", x.Message);
@@ -48,6 +55,14 @@ namespace s3b
         public static void info(string msg)
         {
             log("info", msg);
+        }
+
+        public static void info(List<string> L)
+        {
+            foreach (string s in L)
+            {
+                info(s);
+            }
         }
 
         public static void debug( string msg )
