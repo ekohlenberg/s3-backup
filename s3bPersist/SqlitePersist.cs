@@ -40,7 +40,7 @@ namespace s3b
 
         public override void select(SelectCallback selectCallback, string sql)
         {
-            string connectionStr = Config.getString("db.connection");
+            string connectionStr = Config.getConfig().getString("db.connection");
 
             using (SqliteCommand command = new SqliteCommand(sql, getConnection(connectionStr)))
             {
@@ -91,7 +91,7 @@ namespace s3b
         {
             try
             {
-                string connectionStr = Config.getString("db.connection");
+                string connectionStr = Config.getConfig().getString("db.connection");
 
                 using (SqliteCommand command = new SqliteCommand(sql, getConnection(connectionStr)))
                 {

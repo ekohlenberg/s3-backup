@@ -1,159 +1,97 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text;
 using System.IO;
 using System.Reflection;
+using System.Data.Common;
+
 namespace s3b
 {
-    class Program
+    public class Backup : Job
     {
-        static PersistBase persist = null;
 
-        static string bucket = string.Empty;
-        static string backup_folder = string.Empty;
+         PersistBase persist = null;
 
+         string bucket = string.Empty;
+         string backup_folder = string.Empty;
+            int maxRetry = 3;
 
-        public class UsageException : Exception
+        public Backup()
         {
-            public UsageException(string message) : base(message + "\ns3b <backup_folder> <s3_bucket>\n")
-            {
-            }
+
         }
 
-        static int Main(string[] args)
-        { 
-            int retcode = 0;
-
-            try
-            {
-                parse(args);
-
-                Backup backup = new Backup();
-
-                backup.run(Config.getConfig());
-
-            }
-            catch (UsageException u)
-            {
-                Logger.info(u.Message);
-                retcode = 1;
-            }
-            catch (Exception e)
-            {
-                Logger.error(e);
-                retcode = 1;
-            }
-
-            return retcode;
-        }
-
-        static void parse(string[] args)
+        override public bool run(Model args)
         {
-            if (args.Length != 2) throw new UsageException("Incorrect number of arguments.");
-
-            string backup_folder = args[0];
-
-            string root_folder_path = Path.GetFullPath(backup_folder);
-
-            if (!Directory.Exists(root_folder_path)) throw new UsageException("Folder " + root_folder_path + " does not exist.");
-
-            string bucket = args[1];
-
-            Config.getConfig().setValue("temp", Config.getConfig().getString("s3b.temp"));
-            Config.getConfig().setValue("bucket", bucket);
-            Config.getConfig().setValue("backup_folder", backup_folder);
-            Config.getConfig().setValue("root_folder_path", root_folder_path);
-        }
-
-
-        /*
-            static int oldMain(string[] args)
-        {
-            int retcode = 0;
             int retry = 0;
             persist = new SqlitePersist(new s3bSqliteTemplate());
             Logger.Persist = persist;
 
+            Logger.info("starting...");
+
+            persist.execCmd("delete from message_log");
+
+            BackupSet bset = BackupSet.factory(args);
+
+            load(bset);
+
+            init(bset);
+
+            folders(bset);
+
+            files(bset);
+
+            newer(bset);
+
+            recon(bset);
+
+            do
+            {
+                process(bset);
+            }
+            while (!recon(bset) && (retry++ < maxRetry));
+
+            bset.last_backup_datetime = DateTime.Now;
+            persist.update(bset);
+
+            Logger.info("complete.");
+
             
 
-            try
-            {
-                Logger.info("starting...");
-
-
-
-                persist.execCmd("delete from message_log");
-
-                BackupSet bset = parse(args);
-
-                load(bset);
-
-                init(bset);
-
-                folders(bset);
-
-                files(bset);
-
-                newer(bset);
-
-                recon(bset);
-
-                do
-                {
-                    process(bset);
-                }
-                while (!recon(bset) && (retry++ < maxRetry));
-
-                bset.last_backup_datetime = DateTime.Now;
-                persist.update(bset);
-
-                Logger.info("complete.");
-
-            }
-            catch( UsageException u)
-            {
-                Logger.info(u.Message);
-                retcode = 1;
-            }
-            catch( Exception e)
-            {
-                Logger.error(e);
-                retcode = 1;
-            }
-
-            return retcode;
+            return true;
         }
-
-        }
-
-        private static void setParameters(LocalFolder fldr)
-        {
-            Config.getConfig().setValue("localfolder", fldr.folder_path);
-            Config.getConfig().setValue("localfile", fldr.folder_path + "\\*");
-            Config.getConfig().setValue("archive.name", fldr.getArchiveName());
-
-        }
-
        
 
+        
 
-        // update all prev timestamp to the current timestemp (the last timestamp from the prev run)
-        static void init(BackupSet bset)
+        private  void setParameters(LocalFolder fldr)
         {
-            
+            Config config = Config.getConfig();
+
+            config.setValue("localfolder", fldr.folder_path);
+            config.setValue("localfile", fldr.folder_path + "\\*");
+            config.setValue("archive.name", fldr.getArchiveName());
+        }
+
+        
+        // update all prev timestamp to the current timestemp (the last timestamp from the prev run)
+         void init(BackupSet bset)
+        {
+
             string sql = @"update local_file set previous_update = current_update where folder_id in (
                            select fldr.id from local_folder fldr where fldr.backup_set_id =$(id))";
 
             persist.execCmd(bset, sql);
-            
+
         }
-        static void load(BackupSet bset)
+         void load(BackupSet bset)
         {
             Logger.info("loading backup set " + bset.root_folder_path);
 
             persist.put(bset, "root_folder_path");
         }
 
-        static void folders(BackupSet bset)
+         void folders(BackupSet bset)
         {
             string[] dirs = Directory.GetDirectories(bset.root_folder_path);
 
@@ -163,43 +101,29 @@ namespace s3b
 
             foreach (string d in dirs)
             {
-                fldr = addChildFolder(bset, d);
+                fldr = new LocalFolder();
+                fldr.backup_set_id = bset.id;
+                fldr.folder_path = d;
+                persist.put(fldr, "folder_path");
+                bset.localFolders.Add(fldr.id, fldr);
+                persist.get(fldr);
             }
 
-            fldr = addRootFolder(bset);
-        }
-
-        private static LocalFolder addRootFolder(BackupSet bset)
-        {
-            LocalFolder fldr = new LocalFolder();
+            fldr = new LocalFolder();
             fldr.backup_set_id = bset.id;
             fldr.folder_path = bset.root_folder_path;
             fldr.recurse = false;
             persist.put(fldr, "folder_path");
             bset.localFolders.Add(fldr.id, fldr);
-            fldr.backupSet = bset;
             persist.get(fldr);
-            return fldr;
-        }
-
-        private static LocalFolder addChildFolder(BackupSet bset, string d)
-        {
-            LocalFolder fldr = new LocalFolder();
-            fldr.backup_set_id = bset.id;
-            fldr.folder_path = d;
-            persist.put(fldr, "folder_path");
-            bset.localFolders.Add(fldr.id, fldr);
-            fldr.backupSet = bset;
-            persist.get(fldr);
-            return fldr;
         }
 
         delegate void FileCallback(string filename);
 
         // put all files into the database recursively
-        static void files(BackupSet bset)
-        { 
-            foreach(LocalFolder fldr in bset.localFolders.Values)
+         void files(BackupSet bset)
+        {
+            foreach (LocalFolder fldr in bset.localFolders.Values)
             {
                 Logger.info("loading files for folder " + fldr.folder_path);
 
@@ -225,14 +149,14 @@ namespace s3b
                         dcb(f);
                     }
                 }
-                catch(Exception x)
+                catch (Exception x)
                 {
                     Logger.error(x);
                 }
             }
         }
 
-        private static void dirSearch(string folder_path, FileCallback dcb)
+        private  void dirSearch(string folder_path, FileCallback dcb)
         {
             try
             {
@@ -256,47 +180,58 @@ namespace s3b
         // select all the parent folders where there exists any file where the current timestamp is newer than the prev timestamp
         // default null prev timestmp to 1/1/1900 
         // insert found parent folders into a work list
-        static void newer(BackupSet bset)
+         void newer(BackupSet bset)
         {
-        //   string sql = @"select distinct fldr.* from local_file f
-        //                    inner join local_folder fldr on
-	       //                     fldr.id = f.folder_id 
-        //                    where
-	       //                     fldr.backup_set_id=$(id) and
-	       //                     (f.current_update > isnull( f.previous_update, convert( datetime, '1900-01-01', 102)) or
-								//(fldr.stage + '.' + fldr.status <> 'upload.complete'))
-        //                    ";
+            /* string sql = @"select distinct fldr.* from local_file f
+                             inner join local_folder fldr on
+                                 fldr.id = f.folder_id 
+                             where
+                                 fldr.backup_set_id=$(id) and
+                                 (f.current_update > isnull( f.previous_update, convert( datetime, '1900-01-01', 102)) or
+                                 (fldr.stage + '.' + fldr.status <> 'upload.complete'))
+                             ";
+            */
             PersistBase.SelectCallback scb = (rdr) =>
             {
                 long id = Convert.ToInt64(rdr["id"]);
 
                 if (bset.localFolders.ContainsKey(id))
                 {
-                    LocalFolder fldr = bset.localFolders[id];
-                    Logger.debug("adding newer folder: " + fldr.folder_path);
-                    bset.workFolders.Add(fldr);
-                    fldr.backupSet = bset;
-                    updateStatus(fldr, "new", "none");
+                    setChildFolder(bset, id);
                 }
                 else
                 {
-                    LocalFolder fldr = new LocalFolder();
-                    persist.autoAssign(rdr, fldr);
-                    bset.workFolders.Add(fldr);
-                    bset.localFolders.Add(id, fldr);
-                    fldr.backupSet = bset;
-                    Logger.error(fldr.folder_path + " not found in dir listing.");
+                    setRootFolder(bset, rdr, id);
                 }
             };
 
             persist.query(scb, "newer", bset);
         }
 
-        static void process(BackupSet bset)
+        private void setRootFolder(BackupSet bset, DbDataReader rdr, long id)
+        {
+            LocalFolder fldr = new LocalFolder();
+            persist.autoAssign(rdr, fldr);
+            bset.workFolders.Add(fldr);
+            bset.localFolders.Add(id, fldr);
+            fldr.backupSet = bset;
+            Logger.error(fldr.folder_path + " not found in dir listing.");
+        }
+
+        private void setChildFolder(BackupSet bset, long id)
+        {
+            LocalFolder fldr = bset.localFolders[id];
+            Logger.debug("adding newer folder: " + fldr.folder_path);
+            bset.workFolders.Add(fldr);
+            fldr.backupSet = bset;
+            updateStatus(fldr, "new", "none");
+        }
+
+        void process(BackupSet bset)
         {
 
-            foreach ( LocalFolder fldr in bset.workFolders)
-           // LocalFolder fldr = bset.workFolders[0];
+            foreach (LocalFolder fldr in bset.workFolders)
+            // LocalFolder fldr = bset.workFolders[0];
             {
                 if (fldr.files.Count > 0)
                 {
@@ -313,49 +248,50 @@ namespace s3b
 
                     if ((stageCode & (int)LocalFolder.stages.encryptStage) == (int)LocalFolder.stages.encryptStage)
                         encrypt(fldr);
-                    
-                    
+
+
                     if ((stageCode & (int)LocalFolder.stages.uploadStage) == (int)LocalFolder.stages.uploadStage)
                         upload(fldr);
-                    
+
                     if ((stageCode & (int)LocalFolder.stages.cleanStage) == (int)LocalFolder.stages.cleanStage)
                         clean(fldr);
-                    
+
                 }
 
             }
         }
 
-        private static void archive(LocalFolder fldr)
+        private  void archive(LocalFolder fldr)
         {
+            Config config = Config.getConfig();
 
             if (!isStepEnabled("archive")) return;
 
             Logger.info("archiving: " + fldr.folder_path);
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
-            
+
             int retCode = 0;
 
-                       
+
             if (fldr.recurse)
             {
-                Config.setValue("localobject", fldr.folder_path);
+                config.setValue("localobject", fldr.folder_path);
                 retCode = exec("archive.command", "archive.args");
             }
             else
             {
                 foreach (LocalFile f in fldr.files)
                 {
-                    
-                    Config.setValue("localfile", f.full_path);
-                    Config.setValue("localobject", f.full_path);
+
+                    config.setValue("localfile", f.full_path);
+                    config.setValue("localobject", f.full_path);
 
                     int execCode = exec("archive.command", "archive.args");
                     if (execCode == 1) retCode = 1;
                 }
             }
-           
+
 
             string completion = "complete";
             if (retCode != 0) completion = "error";
@@ -363,28 +299,30 @@ namespace s3b
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
         }
 
-        
 
-        static void compress(LocalFolder fldr)
+
+         void compress(LocalFolder fldr)
         {
             if (!isStepEnabled("compress")) return;
 
             Logger.info("compressing: " + fldr.folder_path);
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
-            
+
             int retCode = exec("compress.command", "compress.args");
             string completion = "complete";
             if (retCode != 0) completion = "error";
 
-            
+
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
 
         }
 
-        static void encrypt(LocalFolder fldr)
+         void encrypt(LocalFolder fldr)
         {
+            Config config = Config.getConfig();
+
             if (!isStepEnabled("encrypt")) return;
 
             Logger.info("encrypting: " + fldr.folder_path);
@@ -392,15 +330,15 @@ namespace s3b
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
 
             string passfile = System.Environment.GetEnvironmentVariable("S3B-PASSFILE");
-            Config.setValue("passfile", passfile);
+            config.setValue("passfile", passfile);
 
             int retCode = exec("encrypt.command", "encrypt.args");
             string completion = "complete";
             if (retCode == 0)
             {
-                FileInfo fi = new FileInfo(Config.getString("encrypt.clean"));
-                
-                fldr.encrypted_file_name = Config.getString("encrypt.target");
+                FileInfo fi = new FileInfo(config.getString("encrypt.clean"));
+
+                fldr.encrypted_file_name = config.getString("encrypt.target");
                 fldr.encrypted_file_size = fi.Length;
 
                 persist.update(fldr);
@@ -413,8 +351,10 @@ namespace s3b
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
         }
 
-        static void upload(LocalFolder fldr)
+         void upload(LocalFolder fldr)
         {
+            Config config = Config.getConfig();
+
             if (!isStepEnabled("upload")) return;
 
             Logger.info("uploading: " + fldr.folder_path);
@@ -422,19 +362,19 @@ namespace s3b
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
 
 
-            Config.setValue("uploadtarget",fldr.backupSet.upload_target);
+            config.setValue("uploadtarget", fldr.backupSet.upload_target);
 
             string completion = "complete";
             if (exec("upload.command", "upload.args") != 0) completion = "error";
 
             fldr.upload_datetime = DateTime.Now;
             persist.update(fldr);
-            
+
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
         }
 
 
-        static bool recon(BackupSet bset)
+         bool recon(BackupSet bset)
         {
             bool result = true;
             if (!isStepEnabled("recon")) return result;
@@ -457,7 +397,7 @@ namespace s3b
                 if (line == null) continue;
                 if (line.Trim().Length == 0) continue;
 
-                string[] parts = line.Split(new char[] { ' ' },StringSplitOptions.RemoveEmptyEntries);
+                string[] parts = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
 
                 if (parts.Length != 4) continue;
 
@@ -482,10 +422,6 @@ namespace s3b
                     else
                     {
                         updateStatus(fldr, "new", "none");
-                        if (!bset.workFolders.Contains(fldr))
-                        {
-                            bset.workFolders.Add(fldr);
-                        }
                         Logger.error(fldr.folder_path + " size does not match uploaded " + encryptedFileName);
                         result = false;
                     }
@@ -500,21 +436,23 @@ namespace s3b
             return result;
         }
 
-        static int exec(string configCmdName, string configArgName)
+         int exec(string configCmdName, string configArgName)
         {
             List<string> stdout;
             List<string> stderr;
-           
-            
-            int result = exec(configCmdName, configArgName,  out stdout, out stderr);
+
+
+            int result = exec(configCmdName, configArgName, out stdout, out stderr);
 
             return result;
         }
 
-        private static int exec(string configCmdName, string configArgName,  out List<string> stdout, out List<string> stderr)
+        private  int exec(string configCmdName, string configArgName, out List<string> stdout, out List<string> stderr)
         {
-            string cmd = Config.getString(configCmdName);
-            string args = Config.getString(configArgName);
+            Config config = Config.getConfig();
+
+            string cmd = config.getString(configCmdName);
+            string args = config.getString(configArgName);
             ProcExec pe = new ProcExec(cmd, args);
             int result = pe.run(Config.getConfig());
 
@@ -524,28 +462,29 @@ namespace s3b
             return result;
         }
 
-        static void clean( LocalFolder fldr)
+         void clean(LocalFolder fldr)
         {
             Logger.info("cleaning temp files: " + fldr.folder_path);
 
-            
-           //  clean("archive.clean", cmdParams); // not necessary as gzip removes source fuke
 
-            
+            //  clean("archive.clean", cmdParams); // not necessary as gzip removes source fuke
+
+
             clean("compress.clean");
             clean("encrypt.clean");
-            
-            
+
+
             string completion = "complete";
-            
+
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, completion);
-            
+
         }
 
-        static void clean(string configName)
+         void clean(string configName)
         {
-            
-            string filename = Config.getString(configName);
+            Config config = Config.getConfig();
+
+            string filename = config.getString(configName);
 
             if (File.Exists(filename))
             {
@@ -556,27 +495,25 @@ namespace s3b
             {
                 Logger.info("unable to clean " + filename);
             }
-            
+
         }
 
-        static void updateStatus( LocalFolder fldr, string stage, string status)
+         void updateStatus(LocalFolder fldr, string stage, string status)
         {
             fldr.stage = stage;
             fldr.status = status;
             persist.update(fldr);
         }
 
-        static  bool isStepEnabled(string stepName)
+         bool isStepEnabled(string stepName)
         {
             bool result = false;
 
-            int enabled = Config.getInt(stepName + ".enabled");
+            int enabled = Config.getConfig().getInt(stepName + ".enabled");
 
             if (enabled == 1) result = true;
 
             return result;
         }
-
-        */
     }
 }
