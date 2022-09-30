@@ -101,21 +101,35 @@ namespace s3b
 
             foreach (string d in dirs)
             {
-                fldr = new LocalFolder();
-                fldr.backup_set_id = bset.id;
-                fldr.folder_path = d;
-                persist.put(fldr, "folder_path");
-                bset.localFolders.Add(fldr.id, fldr);
+                fldr = childFolderFactory(bset, d);
                 persist.get(fldr);
             }
 
-            fldr = new LocalFolder();
+            fldr = rootFolderFactory(bset);
+
+            persist.get(fldr);
+        }
+
+        private LocalFolder childFolderFactory(BackupSet bset, string d)
+        {
+            LocalFolder fldr = new LocalFolder();
+            fldr.backup_set_id = bset.id;
+            fldr.folder_path = d;
+            persist.put(fldr, "folder_path");
+            bset.localFolders.Add(fldr.id, fldr);
+            return fldr;
+        }
+
+        private LocalFolder rootFolderFactory(BackupSet bset)
+        {
+            LocalFolder fldr = new LocalFolder();
             fldr.backup_set_id = bset.id;
             fldr.folder_path = bset.root_folder_path;
             fldr.recurse = false;
             persist.put(fldr, "folder_path");
             bset.localFolders.Add(fldr.id, fldr);
-            persist.get(fldr);
+            fldr.backupSet = bset;
+            return fldr;
         }
 
         delegate void FileCallback(string filename);
@@ -197,18 +211,18 @@ namespace s3b
 
                 if (bset.localFolders.ContainsKey(id))
                 {
-                    setChildFolder(bset, id);
+                    addExistingWorkingFolder(bset, id);
                 }
                 else
                 {
-                    setRootFolder(bset, rdr, id);
+                    addNewWorkingFolder(bset, rdr, id);
                 }
             };
 
             persist.query(scb, "newer", bset);
         }
 
-        private void setRootFolder(BackupSet bset, DbDataReader rdr, long id)
+        private void addNewWorkingFolder(BackupSet bset, DbDataReader rdr, long id)
         {
             LocalFolder fldr = new LocalFolder();
             persist.autoAssign(rdr, fldr);
@@ -218,7 +232,7 @@ namespace s3b
             Logger.error(fldr.folder_path + " not found in dir listing.");
         }
 
-        private void setChildFolder(BackupSet bset, long id)
+        private void addExistingWorkingFolder(BackupSet bset, long id)
         {
             LocalFolder fldr = bset.localFolders[id];
             Logger.debug("adding newer folder: " + fldr.folder_path);
@@ -424,6 +438,7 @@ namespace s3b
                         updateStatus(fldr, "new", "none");
                         Logger.error(fldr.folder_path + " size does not match uploaded " + encryptedFileName);
                         result = false;
+                        fldr.backupSet.workFolders.Add(fldr);
                     }
                 }
                 else
