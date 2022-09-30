@@ -32,6 +32,18 @@ namespace s3b
             return _uploadedFolders;
         }
 
+        public static BackupSet factory(Model args)
+        {
+            Config config = (Config)args;
+
+            BackupSet bset = new BackupSet();
+
+            bset.root_folder_path = config.getString("root_folder_path");
+
+            bset.upload_target = config.getString("bucket");
+
+            return bset;
+        }
         public long id
         {
             get

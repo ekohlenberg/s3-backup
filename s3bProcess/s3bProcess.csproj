@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+    <RootNamespace>s3b</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\s3bCommon\s3bCommon.csproj" />
+    <ProjectReference Include="..\s3bDomain\s3bDomain.csproj" />
+    <ProjectReference Include="..\s3bPersist\s3bPersist.csproj" />
+    <ProjectReference Include="..\s3bSqliteTemplate\s3bSqliteTemplate.csproj" />
+  </ItemGroup>
+
+</Project>
