@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 using System.Reflection;
+using System.IO;
 
 namespace s3b
 {
@@ -38,7 +39,16 @@ namespace s3b
 
             BackupSet bset = new BackupSet();
 
-            bset.root_folder_path = config.getString("root_folder_path");
+            /*
+            Config.getConfig().setValue("temp", Config.getConfig().getString("s3b.temp"));
+            Config.getConfig().setValue("bucket", bucket);
+            Config.getConfig().setValue("backup_folder", folder);
+            Config.getConfig().setValue("root_folder_path", root_folder_path);
+            */
+            string folder = Config.getConfig().getString("folder");
+
+
+            bset.root_folder_path = Path.GetFullPath(folder);
 
             bset.upload_target = config.getString("bucket");
 

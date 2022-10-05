@@ -24,7 +24,8 @@ namespace s3b
         override public bool run(Model args)
         {
             int retry = 0;
-            persist = new SqlitePersist(new s3bSqliteTemplate());
+            persist = PersistBase.Persistence;
+
             Logger.Persist = persist;
 
             Logger.info("starting...");
@@ -451,31 +452,8 @@ namespace s3b
             return result;
         }
 
-         int exec(string configCmdName, string configArgName)
-        {
-            List<string> stdout;
-            List<string> stderr;
-
-
-            int result = exec(configCmdName, configArgName, out stdout, out stderr);
-
-            return result;
-        }
-
-        private  int exec(string configCmdName, string configArgName, out List<string> stdout, out List<string> stderr)
-        {
-            Config config = Config.getConfig();
-
-            string cmd = config.getString(configCmdName);
-            string args = config.getString(configArgName);
-            ProcExec pe = new ProcExec(cmd, args);
-            int result = pe.run(Config.getConfig());
-
-            stdout = pe.stdout;
-            stderr = pe.stderr;
-
-            return result;
-        }
+         
+        
 
          void clean(LocalFolder fldr)
         {
