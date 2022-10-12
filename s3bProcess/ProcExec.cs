@@ -9,16 +9,19 @@ namespace s3b
     {
         string cmd = string.Empty;
         string argTemplate = string.Empty;
-
-        public List<string> stdout = new List<string>();
-        public List<string> stderr = new List<string>();
+        char[] delim = new char[] {' '};
+        
+        
+        
+        public delegate void OutputCallback( string[] tokens );
+      
 
         public ProcExec(string cmd, string argTemplate)
         {
             this.cmd = cmd;
             this.argTemplate = argTemplate;
         }
-        public int run(Model parameters)
+        public int run(Model parameters, OutputCallback stdout, OutputCallback stderr)
         {
             
             ProcessStartInfo processStartInfo;
@@ -48,8 +51,15 @@ namespace s3b
                 delegate (object sender, DataReceivedEventArgs e)
                 {
                     // append the new data to the data already read-in
-                    
-                    stdout.Add(e.Data);                    
+                    if (e.Data == null) return;
+                    if (e.Data.Length == 0) return;
+                    string[] parts = e.Data.Split(delim, StringSplitOptions.RemoveEmptyEntries);
+
+                    if (stdout != null)
+                    {
+                        stdout(parts);
+                        
+                    }                 
                     Console.WriteLine(e.Data);
                 }
             );
@@ -58,8 +68,14 @@ namespace s3b
             (
                 delegate (object sender, DataReceivedEventArgs e)
                 {
-                    // append the new data to the data already read-in
-                    stderr.Add(e.Data);
+                    if (e.Data == null) return;
+                    if (e.Data.Length == 0) return;
+                    string[] parts = e.Data.Split(delim, StringSplitOptions.RemoveEmptyEntries);
+
+                    if (stderr != null)
+                    {
+                        stderr(parts);
+                    }   
                     
                     Console.WriteLine(e.Data);
                 }
@@ -73,11 +89,7 @@ namespace s3b
             process.WaitForExit();
             process.CancelOutputRead();
             
-            // use the output
-            
-            if (stdout.Count > 0) Logger.info(stdout);
-            
-            if (stderr.Count > 0) Logger.error(stdout);
+       
 
             return process.ExitCode;
         }

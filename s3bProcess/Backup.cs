@@ -344,8 +344,7 @@ namespace s3b
 
             updateStatus(fldr, MethodBase.GetCurrentMethod().Name, "in_progess");
 
-            string passfile = System.Environment.GetEnvironmentVariable("S3B-PASSFILE");
-            config.setValue("passfile", passfile);
+            
 
             int retCode = exec("encrypt.command", "encrypt.args");
             string completion = "complete";
@@ -390,67 +389,53 @@ namespace s3b
 
 
          bool recon(BackupSet bset)
-        {
+         {
             bool result = true;
             if (!isStepEnabled("recon")) return result;
 
             Logger.info("reconciling...");
 
-            List<string> stdout;
-            List<string> stderr;
-
-            exec("recon.command", "recon.args", out stdout, out stderr);
-
             Dictionary<string, LocalFolder> uploadedFolders = bset.getUploadedFolders();
 
-            foreach (string line in stdout)
-            {
-                // date
-                // time
-                // size
-                // name
-                if (line == null) continue;
-                if (line.Trim().Length == 0) continue;
+            ProcExec.OutputCallback stdout = (parts) =>
+            { 
+                ObjectInfo objectInfo = ObjectInfo.factory(parts);
 
-                string[] parts = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-
-                if (parts.Length != 4) continue;
-
-                DateTime uploadDateTime;
-                DateTime.TryParse(parts[0] + " " + parts[1], out uploadDateTime);
-
-                int encryptedFileSize = 0;
-                Int32.TryParse(parts[2], out encryptedFileSize);
-
-                string encryptedFileName = parts[3];
-
-                if (uploadedFolders.ContainsKey(encryptedFileName))
+                if (uploadedFolders.ContainsKey(objectInfo.encrypted_file_name))
                 {
-                    LocalFolder fldr = uploadedFolders[encryptedFileName];
+                    LocalFolder fldr = uploadedFolders[objectInfo.encrypted_file_name];
 
-                    Logger.info("checking " + encryptedFileName);
+                    Logger.info("checking " + objectInfo.encrypted_file_name);
 
-                    if (encryptedFileSize == fldr.encrypted_file_size)
+                    if (objectInfo.encrypted_file_size == fldr.encrypted_file_size)
                     {
                         Logger.info("encrypted file size ok");
                     }
                     else
                     {
                         updateStatus(fldr, "new", "none");
-                        Logger.error(fldr.folder_path + " size does not match uploaded " + encryptedFileName);
+                        Logger.error(fldr.folder_path + " size does not match uploaded " + objectInfo.encrypted_file_name);
                         result = false;
                         fldr.backupSet.workFolders.Add(fldr);
                     }
                 }
                 else
                 {
-                    Logger.info(encryptedFileName + " not found. skipping.");
+                    Logger.info(objectInfo.encrypted_file_name + " not found. skipping.");
                 }
 
-            }
+            };
+
+            ProcExec.OutputCallback stderr = (parts) =>
+            {
+                Logger.error(parts);
+
+            };
+
+            exec("recon.command", "recon.args",  stdout,  stderr);
 
             return result;
-        }
+         }
 
          
         

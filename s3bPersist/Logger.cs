@@ -40,6 +40,19 @@ namespace s3b
                 error(s);
             }
         }
+
+        public static void error(string[] strings)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (string s in strings)
+            {
+                sb.Append(s);
+                sb.Append(' ');
+            }
+            sb.Append('\n');
+            error(sb.ToString());
+        }
+
         public static void error(Exception x)
         {
             log("error", x.Message);

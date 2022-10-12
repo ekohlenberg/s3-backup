@@ -4,6 +4,7 @@ using System.Text;
 using System.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Configuration.Json;
+using System.IO;
 
 namespace s3b
 {
@@ -116,6 +117,18 @@ namespace s3b
 
                     _config.Add(k, v);
                 }
+
+                string passfile = System.Environment.GetEnvironmentVariable("S3BPASSFILE");
+                if (passfile == null)
+                    passfile = System.Environment.GetEnvironmentVariable("S3B-PASSFILE");
+#if DEBUG
+                if (passfile == null)
+                    passfile = "/Library/s3b/data/id_pass";
+#endif
+                if (passfile == null) throw new Exception("S3B-PASSFILE or S3BPASSFILE not defined.");
+
+                if (!File.Exists(passfile)) throw new Exception("Password file not found.");
+                _config.setValue("passfile", passfile);
             }
 
             return _config;
