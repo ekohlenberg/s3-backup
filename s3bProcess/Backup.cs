@@ -416,6 +416,7 @@ namespace s3b
                         updateStatus(fldr, "new", "none");
                         Logger.error(fldr.folder_path + " size does not match uploaded " + objectInfo.encrypted_file_name);
                         result = false;
+                        fldr.backupSet = bset;
                         fldr.backupSet.workFolders.Add(fldr);
                     }
                 }
