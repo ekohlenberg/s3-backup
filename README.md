@@ -5,13 +5,18 @@ Tool to backup and sync to an S3-compatible bucket.  Can be used to protect agai
 - Archives and compresses immediate folder children
 - Uses client-side encryption to encrypt folders locally
 - Uploads compressed, encrypted folders to S3
+- Detects changes to local files and uploads only the containing folder
+- Reconciles differences between the backup_folder and corresponding objects.  Uploads the local copy when a difference exists
+- Uses a configuration file to control external dependencies
 
 # Usage
 
-s3b <*folder*> <*bucket*>
+s3b	-action backup -folder <*backup_folder*> -bucket <*s3_bucket*>
+		-action restore -bucket <*s3_bucket*> [-object <*object*>]
 
-- *folder* : the folder to be backed up
-- *bucket* : the target S3 bucket
+- *action*				: can be **backup** or **restore**
+- *backup_folder* : the folder to be backed up
+- *bucket*				: the target S3 bucket
 
 # Dependencies
 
