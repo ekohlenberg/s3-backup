@@ -72,6 +72,7 @@ namespace s3b
             encrypted_file_size = 0;
             upload_datetime = DateTime.Now;
 
+            
             clearDirty();
         }
 

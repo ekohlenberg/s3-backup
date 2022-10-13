@@ -4,17 +4,18 @@ using System.Text;
 using System.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Configuration.Json;
+using System.IO;
 
 namespace s3b
 {
-    public class Config
+    public class Config : Model
     {
         static IConfiguration configBuilder = null;
 
-        protected static Model _settings = null;
-        protected static Template _template = null;
+        protected static Config _config = null;
+        protected Template _template = null;
 
-        static IConfiguration getConfigBuilder()
+        private IConfiguration getConfigBuilder()
         {
             if (configBuilder == null)
             {
@@ -25,14 +26,14 @@ namespace s3b
 
             return configBuilder;
         }
-        static public string getString(string k)
+         public string getString(string k)
         {
-            Model settings = getSettings();
+            
             string result = string.Empty;
 
-            if (settings.ContainsKey(k))
+            if (ContainsKey(k))
             {
-                object o = settings[k];
+                object o = this[k];
 
                 if (o != null)
                 {
@@ -40,21 +41,21 @@ namespace s3b
 
                     Template t = getTemplate();
 
-                    result = t.eval(result, settings);
+                    result = t.eval(result, this);
                 }
             }
 
             return result;
         }
 
-        static private string getConfigString(string param)
+        private string getConfigString(string param)
         {
             IConfigurationSection section = getConfigBuilder().GetSection("appsettings");
 
             return section[param];
         }
 
-        protected static Template getTemplate()
+        protected  Template getTemplate()
         {
             if (_template == null)
             {
@@ -64,68 +65,73 @@ namespace s3b
             return _template;
         }
 
-        static public void setValue(string k, string v)
+         public void setValue(string k, string v)
         {
-            Model settings = getSettings();
-
-            if (settings.ContainsKey(k))
+            if (ContainsKey(k))
             {
-                settings[k] = v;
+                this[k] = v;
             }
             else
             {
-                settings.Add(k, v);
+                Add(k, v);
             }
         }
 
-        static public void setValue(string k, int v)
+        public void setValue(string k, int v)
         {
-            Model settings = getSettings();
-
-            if (settings.ContainsKey(k))
+            if (ContainsKey(k))
             {
-                settings[k] = v.ToString();
+                this[k] = v.ToString();
             }
             else
             {
-                settings.Add(k, v.ToString());
+                Add(k, v.ToString());
             }
-
         }
 
 
-        static public int getInt(string k)
+        public int getInt(string k)
         {
-            Model settings = getSettings();
             int result = 0;
 
-            if (settings.ContainsKey(k))
+            if (ContainsKey(k))
             {
-                result = Convert.ToInt32(settings[k]);
+                result = Convert.ToInt32(this[k]);
             }
 
             return result;
         }
 
-        static public Model getSettings()
+        static public Config getConfig()
         {
-            if (_settings == null)
+            if (_config == null)
             {
-                _settings = new Model();
+                _config = new Config();
 
-                IConfigurationSection section = getConfigBuilder().GetSection("appsettings");
+                IConfigurationSection section = _config.getConfigBuilder().GetSection("appsettings");
 
                 foreach (var c in section.GetChildren())
                 {
                     string k = c.Key;
-                    string v = getConfigString(k);
+                    string v = _config.getConfigString(k);
 
-                    _settings.Add(k, v);
+                    _config.Add(k, v);
                 }
+
+                string passfile = System.Environment.GetEnvironmentVariable("S3BPASSFILE");
+                if (passfile == null)
+                    passfile = System.Environment.GetEnvironmentVariable("S3B-PASSFILE");
+#if DEBUG
+                if (passfile == null)
+                    passfile = "/Library/s3b/data/id_pass";
+#endif
+                if (passfile == null) throw new Exception("S3B-PASSFILE or S3BPASSFILE not defined.");
+
+                if (!File.Exists(passfile)) throw new Exception("Password file not found.");
+                _config.setValue("passfile", passfile);
             }
 
-            return _settings;
-
+            return _config;
         }
     }
 }

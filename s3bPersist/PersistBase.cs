@@ -8,6 +8,13 @@ using System.Resources;
 
 namespace s3b
 {
+    public class PersistException : Exception
+    {
+        public PersistException(string message) : base(message)
+        {
+        }
+    }
+
     public abstract class PersistBase
     {
         public delegate void SelectCallback(DbDataReader rdr);
@@ -24,6 +31,22 @@ namespace s3b
         protected abstract long identity();
 
         protected Dictionary<string, string> sqlTemplates;
+
+        protected static PersistBase _persistence = null;
+
+        public static PersistBase Persistence
+        {
+            get
+            {
+                if (_persistence == null) throw new PersistException("Persist instance not defined.  First assign a SqlLite or SqlPersist instance.");
+                return _persistence;
+            }
+            set
+            {
+                _persistence = value;
+            }
+        }
+
 
 
         public void get(Model t)

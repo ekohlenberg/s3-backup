@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -9,6 +9,7 @@
     <ProjectReference Include="..\s3bCommon\s3bCommon.csproj" />
     <ProjectReference Include="..\s3bDomain\s3bDomain.csproj" />
     <ProjectReference Include="..\s3bPersist\s3bPersist.csproj" />
+    <ProjectReference Include="..\s3bProcess\s3bProcess.csproj" />
     <ProjectReference Include="..\s3bSqliteTemplate\s3bSqliteTemplate.csproj" />
   </ItemGroup>
 
