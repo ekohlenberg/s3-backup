@@ -34,17 +34,7 @@ namespace s3b
 
             BackupSet bset = BackupSet.factory(args);
 
-            load(bset);
-
-            init(bset);
-
-            folders(bset);
-
-            files(bset);
-
-            newer(bset);
-
-            recon(bset);
+            buildWorkingSet(bset);
 
             do
             {
@@ -53,17 +43,74 @@ namespace s3b
             while (!recon(bset) && (retry++ < maxRetry));
 
             bset.last_backup_datetime = DateTime.Now;
+
             persist.update(bset);
 
             Logger.info("complete.");
 
-            
-
             return true;
         }
-       
 
-        
+        private void buildWorkingSet(BackupSet bset)
+        {
+            load(bset);
+
+            folders(bset);
+
+            files(bset);
+
+            recon(bset);
+        }
+
+
+        bool recon(BackupSet bset)
+        {
+            bool result = true;
+            if (!isStepEnabled("recon")) return result;
+
+            Logger.info("reconciling...");
+
+            Dictionary<string, LocalFolder> uploadedFolders = bset.getUploadedFolders();
+
+            ProcExec.OutputCallback stdout = (parts) =>
+            {
+                ObjectInfo objectInfo = ObjectInfo.factory(parts);
+
+                if (uploadedFolders.ContainsKey(objectInfo.encrypted_file_name))
+                {
+                    LocalFolder fldr = uploadedFolders[objectInfo.encrypted_file_name];
+
+                    Logger.info("checking " + objectInfo.encrypted_file_name);
+
+                    if (objectInfo.encrypted_file_size == fldr.encrypted_file_size)
+                    {
+                        Logger.info("encrypted file size ok");
+                    }
+                    else
+                    {
+                        Logger.error(fldr.folder_path + " size does not match uploaded " + objectInfo.encrypted_file_name);
+                        result = false;
+                        addWorkingFolder(bset, fldr);
+                    }
+                }
+                else
+                {
+                    Logger.info(objectInfo.encrypted_file_name + " not found. skipping.");
+                }
+
+            };
+
+            ProcExec.OutputCallback stderr = (parts) =>
+            {
+                Logger.error(parts);
+
+            };
+
+            exec("recon.command", "recon.args", stdout, stderr);
+
+            return result;
+        }
+
 
         private  void setParameters(LocalFolder fldr)
         {
@@ -75,16 +122,7 @@ namespace s3b
         }
 
         
-        // update all prev timestamp to the current timestemp (the last timestamp from the prev run)
-         void init(BackupSet bset)
-        {
 
-            string sql = @"update local_file set previous_update = current_update where folder_id in (
-                           select fldr.id from local_folder fldr where fldr.backup_set_id =$(id))";
-
-            persist.execCmd(bset, sql);
-
-        }
          void load(BackupSet bset)
         {
             Logger.info("loading backup set " + bset.root_folder_path);
@@ -102,32 +140,37 @@ namespace s3b
 
             foreach (string d in dirs)
             {
-                fldr = childFolderFactory(bset, d);
-                persist.get(fldr);
+                childFolderFactory(bset, d);
             }
 
             fldr = rootFolderFactory(bset);
-
-            persist.get(fldr);
         }
 
         private LocalFolder childFolderFactory(BackupSet bset, string d)
         {
-            LocalFolder fldr = new LocalFolder();
-            fldr.backup_set_id = bset.id;
-            fldr.folder_path = d;
-            persist.put(fldr, "folder_path");
-            bset.localFolders.Add(fldr.id, fldr);
-            return fldr;
+            
+            return folderFactory(bset, d, true);
         }
 
         private LocalFolder rootFolderFactory(BackupSet bset)
         {
+            
+
+            return folderFactory(bset, bset.root_folder_path, false);
+        }
+
+        private LocalFolder folderFactory( BackupSet bset, string folderPath, bool recurse )
+        {
             LocalFolder fldr = new LocalFolder();
             fldr.backup_set_id = bset.id;
-            fldr.folder_path = bset.root_folder_path;
-            fldr.recurse = false;
+            fldr.folder_path = folderPath;
+            fldr.recurse = recurse;
+            fldr.backupSet = bset;
             persist.put(fldr, "folder_path");
+            persist.get(fldr);
+            fldr.status = "new";
+            fldr.status = "none";
+
             bset.localFolders.Add(fldr.id, fldr);
             fldr.backupSet = bset;
             return fldr;
@@ -140,28 +183,38 @@ namespace s3b
         {
             foreach (LocalFolder fldr in bset.localFolders.Values)
             {
-                Logger.info("loading files for folder " + fldr.folder_path);
-
-                FileCallback dcb = (filename) =>
-                {
-                    FileInfo fi = new FileInfo(filename);
-                    LocalFile f = new LocalFile();
-
-                    f.full_path = fi.FullName;
-                    f.current_update = fi.LastWriteTime;
-                    f.folder_id = fldr.id;
-
-                    persist.put(f, "full_path");
-                    fldr.files.Add(f);
-                };
-
-                if (fldr.recurse) dirSearch(fldr.folder_path, dcb);
-
                 try
                 {
+
+                    Logger.info("loading files for folder " + fldr.folder_path);
+                    bool filesChanged = false;
+                
+
+                    FileCallback dcb = (filename) =>
+                    {
+                        FileInfo fi = new FileInfo(filename);
+
+                        
+                        if (fi.LastWriteTime > fldr.upload_datetime)
+                        {
+                            filesChanged = true;
+                            fldr.backupLogs.Add(BackupLog.factory(Config.getConfig(), fldr, fi));
+                        }
+                    };
+
+               
+
+                    if (fldr.recurse) dirSearch(fldr.folder_path, dcb);
+
+                
                     foreach (string f in Directory.GetFiles(fldr.folder_path))
                     {
                         dcb(f);
+                    }
+
+                    if (filesChanged)
+                    {
+                        addWorkingFolder(bset, fldr);
                     }
                 }
                 catch (Exception x)
@@ -192,86 +245,44 @@ namespace s3b
             }
         }
 
-        // select all the parent folders where there exists any file where the current timestamp is newer than the prev timestamp
-        // default null prev timestmp to 1/1/1900 
-        // insert found parent folders into a work list
-         void newer(BackupSet bset)
+        private void addWorkingFolder(BackupSet bset, LocalFolder fldr)
         {
-            /* string sql = @"select distinct fldr.* from local_file f
-                             inner join local_folder fldr on
-                                 fldr.id = f.folder_id 
-                             where
-                                 fldr.backup_set_id=$(id) and
-                                 (f.current_update > isnull( f.previous_update, convert( datetime, '1900-01-01', 102)) or
-                                 (fldr.stage + '.' + fldr.status <> 'upload.complete'))
-                             ";
-            */
-            PersistBase.SelectCallback scb = (rdr) =>
-            {
-                long id = Convert.ToInt64(rdr["id"]);
-
-                if (bset.localFolders.ContainsKey(id))
-                {
-                    addExistingWorkingFolder(bset, id);
-                }
-                else
-                {
-                    addNewWorkingFolder(bset, rdr, id);
-                }
-            };
-
-            persist.query(scb, "newer", bset);
-        }
-
-        private void addNewWorkingFolder(BackupSet bset, DbDataReader rdr, long id)
-        {
-            LocalFolder fldr = new LocalFolder();
-            persist.autoAssign(rdr, fldr);
-            bset.workFolders.Add(fldr);
-            bset.localFolders.Add(id, fldr);
-            fldr.backupSet = bset;
-            Logger.error(fldr.folder_path + " not found in dir listing.");
-        }
-
-        private void addExistingWorkingFolder(BackupSet bset, long id)
-        {
-            LocalFolder fldr = bset.localFolders[id];
-            Logger.debug("adding newer folder: " + fldr.folder_path);
-            bset.workFolders.Add(fldr);
-            fldr.backupSet = bset;
+            Logger.info("adding working folder: " + fldr.folder_path);
+            if (!bset.workFolders.ContainsKey(fldr.folder_path))
+                bset.workFolders.Add(fldr.folder_path, fldr);
             updateStatus(fldr, "new", "none");
         }
+
+        
 
         void process(BackupSet bset)
         {
 
-            foreach (LocalFolder fldr in bset.workFolders)
-            // LocalFolder fldr = bset.workFolders[0];
+            foreach (LocalFolder fldr in bset.workFolders.Values)
             {
-                if (fldr.files.Count > 0)
-                {
-                    setParameters(fldr);
+                
+                setParameters(fldr);
 
-                    int stageCode = fldr.getStageCode();
+                int stageCode = fldr.getStageCode();
 
-                    Logger.info("processing: " + fldr.folder_path);
-                    if ((stageCode & (int)LocalFolder.stages.archiveStage) == (int)LocalFolder.stages.archiveStage)
-                        archive(fldr);
+                Logger.info("processing: " + fldr.folder_path);
+                if ((stageCode & (int)LocalFolder.stages.archiveStage) == (int)LocalFolder.stages.archiveStage)
+                    archive(fldr);
 
-                    if ((stageCode & (int)LocalFolder.stages.compressStage) == (int)LocalFolder.stages.compressStage)
-                        compress(fldr);
+                if ((stageCode & (int)LocalFolder.stages.compressStage) == (int)LocalFolder.stages.compressStage)
+                    compress(fldr);
 
-                    if ((stageCode & (int)LocalFolder.stages.encryptStage) == (int)LocalFolder.stages.encryptStage)
-                        encrypt(fldr);
+                if ((stageCode & (int)LocalFolder.stages.encryptStage) == (int)LocalFolder.stages.encryptStage)
+                    encrypt(fldr);
 
 
-                    if ((stageCode & (int)LocalFolder.stages.uploadStage) == (int)LocalFolder.stages.uploadStage)
-                        upload(fldr);
+                if ((stageCode & (int)LocalFolder.stages.uploadStage) == (int)LocalFolder.stages.uploadStage)
+                    upload(fldr);
 
-                    if ((stageCode & (int)LocalFolder.stages.cleanStage) == (int)LocalFolder.stages.cleanStage)
-                        clean(fldr);
+                if ((stageCode & (int)LocalFolder.stages.cleanStage) == (int)LocalFolder.stages.cleanStage)
+                    clean(fldr);
 
-                }
+                writeBackupLog(fldr);
 
             }
         }
@@ -296,11 +307,12 @@ namespace s3b
             }
             else
             {
-                foreach (LocalFile f in fldr.files)
-                {
-
-                    config.setValue("localfile", f.full_path);
-                    config.setValue("localobject", f.full_path);
+                //foreach (LocalFile f in fldr.files)
+                string[] files = Directory.GetFiles(fldr.folder_path);
+                foreach (string f in files)
+                {                    
+                    config.setValue("localfile", f);
+                    config.setValue("localobject", f);
 
                     int execCode = exec("archive.command", "archive.args");
                     if (execCode == 1) retCode = 1;
@@ -388,55 +400,7 @@ namespace s3b
         }
 
 
-         bool recon(BackupSet bset)
-         {
-            bool result = true;
-            if (!isStepEnabled("recon")) return result;
-
-            Logger.info("reconciling...");
-
-            Dictionary<string, LocalFolder> uploadedFolders = bset.getUploadedFolders();
-
-            ProcExec.OutputCallback stdout = (parts) =>
-            { 
-                ObjectInfo objectInfo = ObjectInfo.factory(parts);
-
-                if (uploadedFolders.ContainsKey(objectInfo.encrypted_file_name))
-                {
-                    LocalFolder fldr = uploadedFolders[objectInfo.encrypted_file_name];
-
-                    Logger.info("checking " + objectInfo.encrypted_file_name);
-
-                    if (objectInfo.encrypted_file_size == fldr.encrypted_file_size)
-                    {
-                        Logger.info("encrypted file size ok");
-                    }
-                    else
-                    {
-                        updateStatus(fldr, "new", "none");
-                        Logger.error(fldr.folder_path + " size does not match uploaded " + objectInfo.encrypted_file_name);
-                        result = false;
-                        fldr.backupSet = bset;
-                        fldr.backupSet.workFolders.Add(fldr);
-                    }
-                }
-                else
-                {
-                    Logger.info(objectInfo.encrypted_file_name + " not found. skipping.");
-                }
-
-            };
-
-            ProcExec.OutputCallback stderr = (parts) =>
-            {
-                Logger.error(parts);
-
-            };
-
-            exec("recon.command", "recon.args",  stdout,  stderr);
-
-            return result;
-         }
+         
 
          
         
@@ -475,6 +439,15 @@ namespace s3b
                 Logger.info("unable to clean " + filename);
             }
 
+        }
+
+        void writeBackupLog(LocalFolder fldr)
+        {
+            foreach(BackupLog b in fldr.backupLogs)
+            {
+                b.last_upload_time = fldr.upload_datetime;
+                persist.insert(b);
+            }
         }
 
          void updateStatus(LocalFolder fldr, string stage, string status)
