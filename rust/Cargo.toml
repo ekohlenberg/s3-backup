@@ -1,0 +1,54 @@
+[package]
+name = "s3b"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of s3b: archive, compress, encrypt and sync folders to an S3-compatible bucket."
+default-run = "s3b"
+
+[[bin]]
+name = "s3b"
+path = "src/main.rs"
+
+[dependencies]
+# Archiving / compression -- pure Rust, no system tar/gzip binaries needed.
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# Encryption -- authenticated AEAD, pure Rust, no OpenSSL linkage.
+aes-gcm = "0.10"
+
+# Key derivation from the passphrase file (Argon2id).
+argon2 = "0.5"
+
+# Hashing: sha256 for change-detection content hashes, md5 for S3 single-part ETag verification.
+sha2 = "0.10"
+md-5 = "0.10"
+
+# HMAC-SHA256 for hand-rolled SigV4 request signing.
+hmac = "0.12"
+
+# Random salt/nonce generation.
+rand = "0.8"
+
+# Synchronous HTTP client for the hand-rolled S3 SigV4 client (no async runtime).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+# Minimal, dependency-light XML parsing for S3 ListObjectsV2 / error responses.
+quick-xml = "0.31"
+
+# Config file (TOML) and S3 request bodies / bucket manifest (JSON).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Typed errors at module boundaries.
+thiserror = "1"
+
+# Hex encoding for hashes/signatures.
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 2
