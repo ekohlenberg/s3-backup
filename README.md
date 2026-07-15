@@ -22,6 +22,6 @@ s3b	-action backup -folder <*backup_folder*> -bucket <*s3_bucket*>
 
 1. s3b uses tar and gzip to archive and compress files.  Windows requires cygwin or other utilities.
 1. s3b has been only tested with AWS S3.  It is currently configured the AWS command-line, though it should be possible to use other cloud providers' command line utilities.
-1. SQLite is used for the database.  An optional database browser can be used to view the backup information.
+
 
 
