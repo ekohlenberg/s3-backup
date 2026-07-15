@@ -8,8 +8,11 @@ namespace s3b
     public class LocalFolder : Model
     {
         public bool recurse;
-        public List<LocalFile> files;
+       // public List<LocalFile> files;
         public BackupSet backupSet;
+
+        public List<BackupLog> backupLogs = new List<BackupLog>();
+
         public enum stages
         {
             archiveStage = 1,
@@ -66,11 +69,11 @@ namespace s3b
 
             recurse = true;
 
-            files = new List<LocalFile>();
+            //files = new List<LocalFile>();
 
             encrypted_file_name = "";
             encrypted_file_size = 0;
-            upload_datetime = DateTime.Now;
+            upload_datetime = new DateTime(1970, 1, 1);
 
             
             clearDirty();
@@ -80,7 +83,7 @@ namespace s3b
         {
             get
             {
-                return Convert.ToInt32(getPropValue(MethodBase.GetCurrentMethod().Name));
+                return Convert.ToInt64(getPropValue(MethodBase.GetCurrentMethod().Name));
             }
             set
             {
@@ -92,7 +95,7 @@ namespace s3b
         {
             get
             {
-                return Convert.ToInt32(getPropValue(MethodBase.GetCurrentMethod().Name));
+                return Convert.ToInt64(getPropValue(MethodBase.GetCurrentMethod().Name));
             }
             set
             {
@@ -165,7 +168,7 @@ namespace s3b
         {
             get
             {
-                return Convert.ToInt32(getPropValue(MethodBase.GetCurrentMethod().Name));
+                return Convert.ToInt64(getPropValue(MethodBase.GetCurrentMethod().Name));
             }
             set
             {

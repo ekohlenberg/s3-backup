@@ -6,7 +6,7 @@ Tool to backup and sync to an S3-compatible bucket.  Can be used to protect agai
 - Uses client-side encryption to encrypt folders locally
 - Uploads compressed, encrypted folders to S3
 - Detects changes to local files and uploads only the containing folder
-- Reconciles differences between the backup_folder and corresponding objects.  Uploads the local copy when a difference exists
+- Reconciles differences between the backup_folder and corresponding objects.  Uploads the local copy when a difference exists.
 - Uses a configuration file to control external dependencies
 
 # Usage

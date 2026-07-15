@@ -14,7 +14,7 @@ namespace s3b
         }
 
         
-        public List<LocalFolder> workFolders = new List<LocalFolder>();
+        public Dictionary<string, LocalFolder> workFolders = new Dictionary<string, LocalFolder>();
         public Dictionary<long, LocalFolder> localFolders = new Dictionary<long, LocalFolder>();
         private Dictionary<string, LocalFolder> _uploadedFolders = new Dictionary<string, LocalFolder>();
 
@@ -58,7 +58,7 @@ namespace s3b
         {
             get
             {
-                return Convert.ToInt32(getPropValue(MethodBase.GetCurrentMethod().Name));
+                return Convert.ToInt64(getPropValue(MethodBase.GetCurrentMethod().Name));
             }
             set
             {
