@@ -15,17 +15,11 @@ the project's migration notes.
 cargo build --release
 ```
 
-The binary is `target/release/s3b`.
+The binary is `target/release/s3b` (`s3b.exe` on Windows).
 
-**Note on this delivery:** this code was written and reviewed by hand in an
-environment without network access to crates.io's package-download host or
-rust-lang.org (both were blocked in the sandbox this was built in), so it has
-**not** been compiled or run yet. Every external-crate API call was checked
-against known-correct usage patterns, and the standalone logic (hashing,
-SigV4 signing, date math) was independently cross-checked against Python
-(`hashlib`/`hmac`) for correctness. Please run `cargo build && cargo test` as
-the first step -- if anything doesn't compile, the error output should
-pinpoint it quickly since each module is small and single-purpose.
+Builds and runs on macOS, Linux, and Windows -- every dependency is pure
+Rust (no OpenSSL, no system zlib, no `tar`/`gzip`/`aws` CLI), so there's
+nothing platform-specific to install first.
 
 ## Usage
 
@@ -49,13 +43,29 @@ Optional config file (TOML), path via `-config <path>`, or `./s3b.toml` if
 present:
 
 ```toml
-temp_dir = "/tmp/s3b"
+temp_dir = "/tmp/s3b"     # defaults to the OS temp dir + "s3b" if omitted
 region = "us-east-1"
 s3_endpoint = "https://s3.us-west-000.backblazeb2.com"  # for non-AWS S3-compatible providers
 retry_attempts = 3
 hostname = "erics-mbp"   # override; defaults to the OS hostname
 username = "eric"        # override; defaults to $USER
 ```
+
+`hostname` is resolved from (in order): this config field, `$HOSTNAME` /
+`%COMPUTERNAME%`, `/etc/hostname` (Linux), then the `hostname` command
+(covers macOS, which doesn't populate `/etc/hostname`). `username` comes
+from this config field, then `$USER` / `%USERNAME%`.
+
+### Platform notes
+
+- `temp_dir` defaults to the OS temp directory (`$TMPDIR`/`/tmp` on
+  Unix, `%TEMP%` on Windows) with an `s3b` subfolder -- override it in
+  `s3b.toml` if you want it somewhere specific.
+- Object names (built from hostname/username/folder path) are sanitized to
+  be valid as both S3 keys and local filenames, since they're also used as
+  temp file names during backup/restore -- so they're safe under Windows'
+  stricter filename rules (`< > : " / \ | ? *` and control characters are
+  all replaced with `_`), not just S3's more permissive ones.
 
 ## What changed from the .NET version
 

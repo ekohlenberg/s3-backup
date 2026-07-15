@@ -46,8 +46,16 @@ pub struct FileConfig {
 
 impl Default for FileConfig {
     fn default() -> Self {
+        // std::env::temp_dir() resolves to the right place per platform
+        // ($TMPDIR/tmp on Unix, %TEMP% on Windows) rather than hardcoding a
+        // Unix path that doesn't exist on Windows.
+        let temp_dir = std::env::temp_dir()
+            .join("s3b")
+            .to_string_lossy()
+            .to_string();
+
         FileConfig {
-            temp_dir: "/tmp/s3b".to_string(),
+            temp_dir,
             region: "us-east-1".to_string(),
             s3_endpoint: None,
             retry_attempts: 3,
@@ -160,12 +168,30 @@ impl Config {
     }
 }
 
-/// Best-effort hostname lookup via `/proc/sys/kernel/hostname` or the
-/// `hostname` syscall's usual `/etc/hostname` fallback, without pulling in a
-/// crate just for this.
+/// Best-effort hostname lookup for when neither the config file nor
+/// `$HOSTNAME`/`$COMPUTERNAME` supplied one.
+///
+/// `/etc/hostname` (tried first) covers most Linux distros, where it's
+/// populated by the OS. It does *not* cover macOS: macOS stores the
+/// hostname via `scutil`/SystemConfiguration instead and never writes
+/// `/etc/hostname`, and interactive shells (zsh in particular) generally
+/// don't export `$HOSTNAME` to child processes even though it's set as a
+/// shell parameter. The `hostname` command is present on both platforms and
+/// is what resolves it correctly there.
 fn hostname_fallback() -> Option<String> {
-    std::fs::read_to_string("/etc/hostname")
+    if let Some(h) = std::fs::read_to_string("/etc/hostname")
         .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(h);
+    }
+
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -177,7 +203,10 @@ mod tests {
     #[test]
     fn default_file_config_matches_docs() {
         let d = FileConfig::default();
-        assert_eq!(d.temp_dir, "/tmp/s3b");
+        // Platform-dependent (std::env::temp_dir()/s3b): just check it ends
+        // up under the OS temp dir with an "s3b" leaf, rather than asserting
+        // a Unix-only literal path.
+        assert!(d.temp_dir.ends_with("s3b"));
         assert_eq!(d.retry_attempts, 3);
     }
 

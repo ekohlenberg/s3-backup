@@ -4,6 +4,13 @@
 //! what makes the "multi-host awareness" requirement work (see requirements
 //! doc section 9): distinct hosts/users backing up the same-named folder
 //! into a shared bucket don't collide.
+//!
+//! The result doubles as a local filename (backup.rs builds temp file paths
+//! from it), so it has to be valid on every platform we run on, not just as
+//! an S3 key. S3 keys tolerate almost anything; Windows filenames don't --
+//! `< > : " / \ | ? *` and control characters are all rejected there, so
+//! all of them are sanitized here rather than just the separator characters
+//! a Unix-only version would need.
 
 pub const ARCHIVE_SUFFIX: &str = ".tar.gz.enc";
 
@@ -11,7 +18,8 @@ pub fn sanitize_path_component(path: &str) -> String {
     let mapped: String = path
         .chars()
         .map(|c| match c {
-            '/' | '\\' | ':' | ' ' => '_',
+            '/' | '\\' | ':' | ' ' | '<' | '>' | '"' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
             other => other,
         })
         .collect();
@@ -71,6 +79,14 @@ mod tests {
     #[test]
     fn windows_path_sanitized() {
         assert_eq!(sanitize_path_component(r"C:\Users\eric"), "C_Users_eric");
+    }
+
+    #[test]
+    fn windows_reserved_filename_characters_sanitized() {
+        // < > : " / \ | ? * are all rejected in Windows filenames; the
+        // sanitized result is used as a local temp filename, not just an S3
+        // key, so all of them need to come out clean.
+        assert_eq!(sanitize_path_component("a<b>c:d\"e|f?g*h"), "a_b_c_d_e_f_g_h");
     }
 
     #[test]
