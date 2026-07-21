@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-pub const USAGE: &str = "s3b -action backup  -folder <backup_folder> -bucket <s3_bucket>\ns3b -action restore -bucket <s3_bucket> [-object <object>]";
+pub const USAGE: &str = "s3b -action backup  -folder <backup_folder> -bucket <s3_bucket> [-force]\ns3b -action restore -bucket <s3_bucket> -key <private_key_file> [-object <object>]\ns3b -action genkey  [-out <key_prefix>]\n\nbackup   reads the recipient's public key path from S3BPUBKEY (or S3B-PUBKEY),\n         falling back to ~/s3b.pub if neither is set\n-force   re-uploads every folder, bypassing the content-hash change check\ngenkey   writes <key_prefix>.pub and <key_prefix>.key (prefix defaults to 's3b')";
 
 /// Top-level application error. `Usage` errors print the usage string and
 /// exit 1; every other variant is logged and also exits 1 -- there is no

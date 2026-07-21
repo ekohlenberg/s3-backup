@@ -73,7 +73,6 @@ pub struct Config {
     pub retry_attempts: u32,
     pub hostname: String,
     pub username: String,
-    pub passphrase_path: PathBuf,
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
     pub aws_session_token: Option<String>,
@@ -92,10 +91,14 @@ fn env_first(names: &[&str]) -> Option<String> {
 
 impl Config {
     /// Loads `<config_path>` (or defaults if absent), then resolves
-    /// everything that must come from the environment: the passphrase file
-    /// path and AWS credentials. Fails fast (before any pipeline work
-    /// starts) if any required value is missing, matching the original
-    /// "no passfile path resolved -> fail before any work starts" behavior.
+    /// everything that must come from the environment: AWS credentials.
+    /// Fails fast (before any pipeline work starts) if any required value is
+    /// missing, matching the original "fail before any work starts"
+    /// behavior. The recipient public/private key paths are *not* resolved
+    /// here -- `genkey` needs neither, `backup` resolves the public key
+    /// itself via `crypto::resolve_and_load_public_key`, and `restore`
+    /// receives the private key path directly from the `-key` CLI flag --
+    /// so a bare `Config` no longer implies "a key secret is available."
     pub fn load(config_path: Option<&str>) -> Result<Config, AppError> {
         let file_cfg: FileConfig = match config_path {
             Some(p) => {
@@ -115,22 +118,6 @@ impl Config {
                 }
             }
         };
-
-        // Passphrase file: S3BPASSFILE, then S3B-PASSFILE (kept from the
-        // original for compatibility; no DEBUG-build local fallback path --
-        // that was a macOS-dev-machine convenience, not a real requirement).
-        let passfile_path = env_first(&["S3BPASSFILE", "S3B-PASSFILE"]).ok_or_else(|| {
-            AppError::Config(
-                "no passphrase file configured: set S3BPASSFILE (or S3B-PASSFILE) to the path of the passphrase file".into(),
-            )
-        })?;
-        let passphrase_path = PathBuf::from(&passfile_path);
-        if !passphrase_path.exists() {
-            return Err(AppError::Config(format!(
-                "passphrase file '{}' does not exist",
-                passphrase_path.display()
-            )));
-        }
 
         let aws_access_key_id = env_first(&["AWS_ACCESS_KEY_ID"])
             .ok_or_else(|| AppError::Config("AWS_ACCESS_KEY_ID is not set".into()))?;
@@ -160,7 +147,6 @@ impl Config {
             retry_attempts: file_cfg.retry_attempts,
             hostname,
             username,
-            passphrase_path,
             aws_access_key_id,
             aws_secret_access_key,
             aws_session_token,

@@ -17,11 +17,16 @@ use crate::manifest::MANIFEST_KEY;
 use crate::naming;
 use crate::s3::S3Client;
 
-pub fn run(cfg: &Config, bucket: &str, object: Option<&str>) -> Result<(), AppError> {
+pub fn run(
+    cfg: &Config,
+    bucket: &str,
+    object: Option<&str>,
+    private_key_path: &std::path::Path,
+) -> Result<(), AppError> {
     std::fs::create_dir_all(&cfg.temp_dir).map_err(|e| AppError::io(&cfg.temp_dir, e))?;
 
     let client = S3Client::new(cfg, bucket);
-    let passphrase = crypto::read_passphrase(&cfg.passphrase_path)?;
+    let private_key = crypto::load_private_key(private_key_path)?;
 
     // The initial listing call failing aborts the whole restore (via `?`),
     // matching "reflects... the initial listing call" in requirement 5.6.
@@ -42,7 +47,7 @@ pub fn run(cfg: &Config, bucket: &str, object: Option<&str>) -> Result<(), AppEr
 
     let mut summary = RunSummary::default();
     for obj in &matching {
-        match restore_object(&client, cfg, &passphrase, &obj.key) {
+        match restore_object(&client, cfg, &private_key, &obj.key) {
             Ok(dest) => {
                 info(format!("restored {} -> {}", obj.key, dest.display()));
                 summary.succeeded += 1;
@@ -67,13 +72,13 @@ pub fn run(cfg: &Config, bucket: &str, object: Option<&str>) -> Result<(), AppEr
 fn restore_object(
     client: &S3Client,
     cfg: &Config,
-    passphrase: &[u8],
+    private_key: &[u8; 32],
     key: &str,
 ) -> Result<std::path::PathBuf, AppError> {
     let base = naming::base_name_from_object_key(key).unwrap_or_else(|| key.replace('/', "_"));
 
     let ciphertext = client.get_object(key)?;
-    let plaintext = crypto::decrypt(&ciphertext, passphrase)?;
+    let plaintext = crypto::decrypt(&ciphertext, private_key)?;
 
     let tar_gz_path = cfg.temp_dir.join(format!("{base}.restore.tar.gz.tmp"));
     std::fs::write(&tar_gz_path, &plaintext).map_err(|e| AppError::io(&tar_gz_path, e))?;

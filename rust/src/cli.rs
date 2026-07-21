@@ -1,5 +1,6 @@
 //! Hand-rolled `-key value` argument parsing, mirroring the original scheme
-//! rather than pulling in `clap` for a two-verb CLI (see migration notes).
+//! rather than pulling in `clap` for a small, fixed set of verbs (see
+//! migration notes).
 
 use crate::error::AppError;
 
@@ -7,27 +8,46 @@ use crate::error::AppError;
 pub enum Action {
     Backup,
     Restore,
+    Genkey,
 }
 
 #[derive(Debug, Clone)]
 pub struct Args {
     pub action: Action,
-    pub bucket: String,
+    /// Required for backup/restore; unused for genkey.
+    pub bucket: Option<String>,
+    /// Required for backup.
     pub folder: Option<String>,
+    /// Optional for restore; unused elsewhere.
     pub object: Option<String>,
     pub config_path: Option<String>,
+    /// Required for genkey: the `<prefix>` written to `<prefix>.pub`/`<prefix>.key`.
+    pub out: Option<String>,
+    /// Required for restore: path to the private key file.
+    pub key: Option<String>,
+    /// `-force`, backup only: upload every folder regardless of the
+    /// content-hash change check.
+    pub force: bool,
 }
+
+/// Flags that stand alone (no following value) -- everything else follows
+/// the strict `-key value` pairing described below.
+const BOOLEAN_FLAGS: &[&str] = &["force"];
 
 /// Parses `argv` (excluding the program name) into a flat `-key value` map,
 /// then validates it into `Args`.
 ///
-/// Requirements enforced here (from the requirements doc):
-/// - any `-flag` with no following non-dash token is invalid
-/// - `-action` is required and must be exactly `backup` or `restore`
-/// - `backup` requires `-bucket` and `-folder`
-/// - `restore` requires `-bucket`; `-object` is optional
+/// Requirements enforced here (from the requirements doc, extended for the
+/// `genkey` action added by the recipient-keypair encryption change):
+/// - any `-flag` with no following non-dash token is invalid, *except* the
+///   flags listed in `BOOLEAN_FLAGS`, which take no value at all
+/// - `-action` is required and must be exactly `backup`, `restore`, or `genkey`
+/// - `backup` requires `-bucket` and `-folder`; `-force` is optional
+/// - `restore` requires `-bucket` and `-key`; `-object` is optional
+/// - `genkey`'s `-out` is optional (defaults to `crypto::DEFAULT_KEY_PREFIX`)
 pub fn parse(argv: &[String]) -> Result<Args, AppError> {
     let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut force = false;
 
     let mut i = 0;
     while i < argv.len() {
@@ -36,6 +56,13 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
             if key.is_empty() {
                 return Err(AppError::Usage(format!("empty flag at position {i}")));
             }
+            if BOOLEAN_FLAGS.contains(&key) {
+                if key == "force" {
+                    force = true;
+                }
+                i += 1;
+                continue;
+            }
             let next = argv.get(i + 1);
             match next {
                 Some(v) if !v.starts_with('-') => {
@@ -43,9 +70,7 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
                     i += 2;
                 }
                 _ => {
-                    return Err(AppError::Usage(format!(
-                        "flag -{key} requires a value"
-                    )));
+                    return Err(AppError::Usage(format!("flag -{key} requires a value")));
                 }
             }
         } else {
@@ -61,22 +86,44 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
     let action = match action_str.as_str() {
         "backup" => Action::Backup,
         "restore" => Action::Restore,
+        "genkey" => Action::Genkey,
         other => {
             return Err(AppError::Usage(format!(
-                "-action must be 'backup' or 'restore', got '{other}'"
+                "-action must be 'backup', 'restore', or 'genkey', got '{other}'"
             )))
         }
     };
 
-    let bucket = map
-        .remove("bucket")
-        .ok_or_else(|| AppError::Usage("-bucket is required".into()))?;
+    let bucket = map.remove("bucket");
     let folder = map.remove("folder");
     let object = map.remove("object");
     let config_path = map.remove("config");
+    let out = map.remove("out");
+    let key = map.remove("key");
 
-    if action == Action::Backup && folder.is_none() {
-        return Err(AppError::Usage("-folder is required for -action backup".into()));
+    match action {
+        Action::Backup => {
+            if bucket.is_none() {
+                return Err(AppError::Usage("-bucket is required for -action backup".into()));
+            }
+            if folder.is_none() {
+                return Err(AppError::Usage("-folder is required for -action backup".into()));
+            }
+        }
+        Action::Restore => {
+            if bucket.is_none() {
+                return Err(AppError::Usage("-bucket is required for -action restore".into()));
+            }
+            if key.is_none() {
+                return Err(AppError::Usage(
+                    "-key <private_key_file> is required for -action restore".into(),
+                ));
+            }
+        }
+        Action::Genkey => {
+            // -out is optional here; the default prefix is applied at the
+            // point of use (main.rs), not during parsing/validation.
+        }
     }
 
     Ok(Args {
@@ -85,6 +132,9 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
         folder,
         object,
         config_path,
+        out,
+        key,
+        force,
     })
 }
 
@@ -103,27 +153,89 @@ mod tests {
     }
 
     #[test]
+    fn backup_requires_bucket() {
+        let err = parse(&v(&["-action", "backup", "-folder", "/tmp/x"])).unwrap_err();
+        assert!(matches!(err, AppError::Usage(_)));
+    }
+
+    #[test]
     fn backup_ok() {
         let a = parse(&v(&["-action", "backup", "-folder", "/tmp/x", "-bucket", "b"])).unwrap();
         assert_eq!(a.action, Action::Backup);
         assert_eq!(a.folder.as_deref(), Some("/tmp/x"));
-        assert_eq!(a.bucket, "b");
+        assert_eq!(a.bucket.as_deref(), Some("b"));
+        assert!(!a.force, "force should default to false");
+    }
+
+    #[test]
+    fn backup_force_flag() {
+        let a = parse(&v(&[
+            "-action", "backup", "-folder", "/tmp/x", "-bucket", "b", "-force",
+        ]))
+        .unwrap();
+        assert!(a.force);
+    }
+
+    #[test]
+    fn force_flag_takes_no_value_and_does_not_consume_the_next_flag() {
+        // -force appearing before another -flag must not swallow it as a value.
+        let a = parse(&v(&[
+            "-action", "backup", "-force", "-folder", "/tmp/x", "-bucket", "b",
+        ]))
+        .unwrap();
+        assert!(a.force);
+        assert_eq!(a.folder.as_deref(), Some("/tmp/x"));
+        assert_eq!(a.bucket.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn force_flag_alone_at_end_of_argv_does_not_error() {
+        // Previously (before -force was a boolean flag) a trailing -flag
+        // with nothing after it was a usage error ("requires a value").
+        let a = parse(&v(&["-action", "genkey", "-force"])).unwrap();
+        assert!(a.force);
+    }
+
+    #[test]
+    fn restore_requires_key() {
+        let err = parse(&v(&["-action", "restore", "-bucket", "b"])).unwrap_err();
+        assert!(matches!(err, AppError::Usage(_)));
     }
 
     #[test]
     fn restore_object_optional() {
-        let a = parse(&v(&["-action", "restore", "-bucket", "b"])).unwrap();
+        let a = parse(&v(&[
+            "-action", "restore", "-bucket", "b", "-key", "/tmp/priv.key",
+        ]))
+        .unwrap();
         assert_eq!(a.action, Action::Restore);
         assert_eq!(a.object, None);
+        assert_eq!(a.key.as_deref(), Some("/tmp/priv.key"));
     }
 
     #[test]
     fn restore_with_object() {
         let a = parse(&v(&[
-            "-action", "restore", "-bucket", "b", "-object", "host_user_path.tar.gz.enc",
+            "-action", "restore", "-bucket", "b", "-key", "/tmp/priv.key", "-object",
+            "host_user_path.tar.gz.enc",
         ]))
         .unwrap();
         assert_eq!(a.object.as_deref(), Some("host_user_path.tar.gz.enc"));
+    }
+
+    #[test]
+    fn genkey_out_is_optional() {
+        let a = parse(&v(&["-action", "genkey"])).unwrap();
+        assert_eq!(a.action, Action::Genkey);
+        assert_eq!(a.out, None);
+    }
+
+    #[test]
+    fn genkey_ok() {
+        let a = parse(&v(&["-action", "genkey", "-out", "/tmp/s3b"])).unwrap();
+        assert_eq!(a.action, Action::Genkey);
+        assert_eq!(a.out.as_deref(), Some("/tmp/s3b"));
+        assert_eq!(a.bucket, None);
     }
 
     #[test]

@@ -51,6 +51,22 @@ fn run(argv: &[String]) -> i32 {
         }
     };
 
+    // genkey needs neither a loaded Config (no AWS credentials, no public
+    // key -- it's what *creates* the public key) nor a bucket, so it's
+    // handled before Config::load rather than folded into the match below.
+    if args.action == cli::Action::Genkey {
+        // -out is optional; defaults to crypto::DEFAULT_KEY_PREFIX ("s3b"),
+        // matching the ~/s3b.pub fallback backup uses when S3BPUBKEY is unset.
+        let out = args.out.as_deref().unwrap_or(crypto::DEFAULT_KEY_PREFIX);
+        return match crypto::genkey(out) {
+            Ok(()) => 0,
+            Err(e) => {
+                logging::error(format!("{e}"));
+                1
+            }
+        };
+    }
+
     let cfg = match config::Config::load(args.config_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -61,11 +77,18 @@ fn run(argv: &[String]) -> i32 {
 
     let result = match args.action {
         cli::Action::Backup => {
-            // Validated by cli::parse: -folder is required for backup.
+            // Validated by cli::parse: -folder and -bucket are required for backup.
             let folder = args.folder.as_deref().expect("cli::parse enforces -folder for backup");
-            backup::run(&cfg, folder, &args.bucket)
+            let bucket = args.bucket.as_deref().expect("cli::parse enforces -bucket for backup");
+            backup::run(&cfg, folder, bucket, args.force)
         }
-        cli::Action::Restore => restore::run(&cfg, &args.bucket, args.object.as_deref()),
+        cli::Action::Restore => {
+            // Validated by cli::parse: -bucket and -key are required for restore.
+            let bucket = args.bucket.as_deref().expect("cli::parse enforces -bucket for restore");
+            let key_path = args.key.as_deref().expect("cli::parse enforces -key for restore");
+            restore::run(&cfg, bucket, args.object.as_deref(), std::path::Path::new(key_path))
+        }
+        cli::Action::Genkey => unreachable!("genkey is handled above, before Config::load"),
     };
 
     match result {

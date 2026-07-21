@@ -17,8 +17,17 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Encryption -- authenticated AEAD, pure Rust, no OpenSSL linkage.
 aes-gcm = "0.10"
 
-# Key derivation from the passphrase file (Argon2id).
-argon2 = "0.5"
+# X25519 key agreement for the recipient keypair (replaces the old
+# Argon2id-over-a-shared-passphrase design). "static_secrets" enables the
+# reusable StaticSecret type used for the long-lived recipient keypair;
+# EphemeralSecret (the per-file sender-side key) needs no feature flag.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# HKDF-SHA256: turns each file's raw X25519 shared secret into an AES-256 key.
+hkdf = "0.12"
+
+# Text-safe encoding for the .pub/.key files genkey writes.
+base64 = "0.22"
 
 # Hashing: sha256 for change-detection content hashes, md5 for S3 single-part ETag verification.
 sha2 = "0.10"
