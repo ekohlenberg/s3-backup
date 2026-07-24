@@ -84,6 +84,15 @@ fn run(argv: &[String]) -> i32 {
         }
     };
 
+    // Wipe the temp directory clean before any other work happens, so any
+    // residue left behind by a killed or crashed previous run (partial
+    // .tmp/.enc files, expanded folders from an interrupted restore/test)
+    // never leaks into this run. See Config::reset_temp_dir.
+    if let Err(e) = cfg.reset_temp_dir() {
+        logging::error(format!("{e}"));
+        return 1;
+    }
+
     // -bucket is optional on the CLI; resolve it once here (falls back to
     // BUCKET=<name> in ~/.s3b/s3b.aws, loaded into cfg.bucket by
     // Config::load) since both remaining actions need it.
@@ -106,6 +115,12 @@ fn run(argv: &[String]) -> i32 {
             // ~/.s3b/s3b.key when it's omitted.
             crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new))
                 .and_then(|key_path| restore::run(&cfg, &bucket, args.object.as_deref(), &key_path))
+        }
+        cli::Action::Test => {
+            // Same -key resolution as Restore; test always covers every
+            // object in the bucket, so there's no -object to pass through.
+            crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new))
+                .and_then(|key_path| restore::run_test(&cfg, &bucket, &key_path))
         }
         cli::Action::Genkey => unreachable!("genkey is handled above, before Config::load"),
     };

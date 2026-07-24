@@ -274,6 +274,27 @@ impl Config {
     pub fn resolve_bucket(&self, explicit: Option<&str>) -> Result<String, AppError> {
         resolve_bucket_from(explicit, self.bucket.as_deref())
     }
+
+    /// Wipes the temp directory clean, then recreates it empty. Called once
+    /// at startup, before any backup/restore/test work begins.
+    ///
+    /// `temp_dir` is pure scratch space: intermediate archive/compress/
+    /// encrypt files during backup, downloaded/decrypted/expanded files
+    /// during restore and test. There's no resumable mid-pipeline state
+    /// (per the migration notes), so nothing in it is meant to survive
+    /// between runs -- but a killed or crashed previous run can still leave
+    /// partial `.tmp`/`.enc` files or expanded folders behind, and starting
+    /// the next run on top of that residue risks confusing output rather
+    /// than a clean rerun. Always starting from an empty directory removes
+    /// that risk entirely.
+    pub fn reset_temp_dir(&self) -> Result<(), AppError> {
+        match std::fs::remove_dir_all(&self.temp_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AppError::io(&self.temp_dir, e)),
+        }
+        std::fs::create_dir_all(&self.temp_dir).map_err(|e| AppError::io(&self.temp_dir, e))
+    }
 }
 
 fn resolve_bucket_from(explicit: Option<&str>, file_bucket: Option<&str>) -> Result<String, AppError> {
@@ -396,6 +417,49 @@ mod tests {
 
         let missing = load_aws_file_at(&dir.path().join("does-not-exist"));
         assert!(missing.is_empty());
+    }
+
+    fn test_config(temp_dir: PathBuf) -> Config {
+        Config {
+            temp_dir,
+            region: "us-east-1".to_string(),
+            s3_endpoint: None,
+            retry_attempts: 3,
+            hostname: "host".to_string(),
+            username: "user".to_string(),
+            aws_access_key_id: "AKIA".to_string(),
+            aws_secret_access_key: "secret".to_string(),
+            aws_session_token: None,
+            bucket: None,
+            multipart_threshold_bytes: 8 * 1024 * 1024,
+            multipart_part_size_bytes: 8 * 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn reset_temp_dir_wipes_existing_content_and_recreates_empty() {
+        let base = tempfile::tempdir().unwrap();
+        let temp_dir = base.path().join("s3b-temp");
+        std::fs::create_dir_all(temp_dir.join("leftover")).unwrap();
+        std::fs::write(temp_dir.join("leftover").join("stray.tmp"), b"x").unwrap();
+        std::fs::write(temp_dir.join("another.tmp"), b"y").unwrap();
+
+        let cfg = test_config(temp_dir.clone());
+        cfg.reset_temp_dir().unwrap();
+
+        assert!(temp_dir.is_dir());
+        assert_eq!(std::fs::read_dir(&temp_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reset_temp_dir_creates_dir_if_it_does_not_exist_yet() {
+        let base = tempfile::tempdir().unwrap();
+        let temp_dir = base.path().join("does-not-exist-yet");
+
+        let cfg = test_config(temp_dir.clone());
+        cfg.reset_temp_dir().unwrap();
+
+        assert!(temp_dir.is_dir());
     }
 
     #[test]

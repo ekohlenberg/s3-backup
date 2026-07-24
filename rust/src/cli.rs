@@ -8,6 +8,10 @@ use crate::error::AppError;
 pub enum Action {
     Backup,
     Restore,
+    /// Downloads, decrypts, and decompresses every object in the bucket to
+    /// verify the restore pipeline works end to end, then deletes each
+    /// result -- a periodic self-test, not a real restore.
+    Test,
     Genkey,
 }
 
@@ -44,13 +48,17 @@ const BOOLEAN_FLAGS: &[&str] = &["force"];
 /// `genkey` action added by the recipient-keypair encryption change):
 /// - any `-flag` with no following non-dash token is invalid, *except* the
 ///   flags listed in `BOOLEAN_FLAGS`, which take no value at all
-/// - `-action` is required and must be exactly `backup`, `restore`, or `genkey`
+/// - `-action` is required and must be exactly `backup`, `restore`, `test`,
+///   or `genkey`
 /// - `backup` requires `-folder`; `-bucket` and `-force` are optional --
 ///   `-bucket` falls back to `BUCKET=<name>` in `~/.s3b/s3b.aws`
 ///   (`config::Config::resolve_bucket`)
 /// - `restore` has no required flags -- `-bucket`, `-key`, and `-object` are
 ///   all optional; `-bucket` falls back the same way as for `backup`, and
 ///   `-key` falls back to `~/.s3b/s3b.key` (`crypto::resolve_private_key_path`)
+/// - `test` has no required flags either -- `-bucket` and `-key` resolve the
+///   same way as for `restore`; there's no `-object` since test always
+///   covers every object in the bucket
 /// - `genkey`'s `-out` is optional (defaults to `~/.s3b/s3b`,
 ///   `crypto::DEFAULT_KEY_PREFIX` under `crypto::DEFAULT_KEY_DIR`)
 pub fn parse(argv: &[String]) -> Result<Args, AppError> {
@@ -94,10 +102,11 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
     let action = match action_str.as_str() {
         "backup" => Action::Backup,
         "restore" => Action::Restore,
+        "test" => Action::Test,
         "genkey" => Action::Genkey,
         other => {
             return Err(AppError::Usage(format!(
-                "-action must be 'backup', 'restore', or 'genkey', got '{other}'"
+                "-action must be 'backup', 'restore', 'test', or 'genkey', got '{other}'"
             )))
         }
     };
@@ -125,6 +134,11 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
             // crypto::resolve_private_key_path (falls back to
             // ~/.s3b/s3b.key), which reports a Config error of its own if
             // that can't be resolved either.
+        }
+        Action::Test => {
+            // Same optional -bucket/-key resolution as Restore; test always
+            // covers every object in the bucket, so there's no -object flag
+            // to validate here.
         }
         Action::Genkey => {
             // -out is optional here; the default prefix is applied at the
@@ -236,6 +250,26 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(a.object.as_deref(), Some("host_user_path.tar.gz.enc"));
+    }
+
+    #[test]
+    fn test_action_bucket_and_key_optional_at_parse_time() {
+        let a = parse(&v(&["-action", "test"])).unwrap();
+        assert_eq!(a.action, Action::Test);
+        assert_eq!(a.bucket, None);
+        assert_eq!(a.key, None);
+        assert_eq!(a.object, None);
+    }
+
+    #[test]
+    fn test_action_with_bucket_and_key() {
+        let a = parse(&v(&[
+            "-action", "test", "-bucket", "b", "-key", "/tmp/priv.key",
+        ]))
+        .unwrap();
+        assert_eq!(a.action, Action::Test);
+        assert_eq!(a.bucket.as_deref(), Some("b"));
+        assert_eq!(a.key.as_deref(), Some("/tmp/priv.key"));
     }
 
     #[test]
