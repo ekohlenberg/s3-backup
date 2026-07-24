@@ -6,8 +6,9 @@
 //! and decryption secret: any host that could back up could also decrypt
 //! every backup ever made, from any host. With a keypair, backup machines
 //! hold only the public key (`S3BPUBKEY`); decryption requires the private
-//! key, which is passed explicitly via `-key` on `-action restore` and is
-//! never read from the environment.
+//! key, passed via `-key` on `-action restore` (falling back to
+//! `~/.s3b/s3b.key` if omitted -- see `resolve_private_key_path`) and never
+//! read from the environment.
 //!
 //! Container format for every encrypted object (all lengths fixed, so there
 //! is nothing to misparse -- unchanged in spirit from the passphrase-based
@@ -46,10 +47,16 @@ const HKDF_INFO: &[u8] = b"s3b-file-key";
 /// `S3B-PASSFILE`).
 pub const PUBKEY_ENV: &[&str] = &["S3BPUBKEY", "S3B-PUBKEY"];
 
-/// Default `genkey` prefix when `-out` is omitted, and the basename `backup`
-/// falls back to (as `~/s3b.pub`) when neither `S3BPUBKEY` nor `S3B-PUBKEY`
-/// is set.
+/// Basename `genkey` writes `.pub`/`.key` under when `-out` is omitted.
 pub const DEFAULT_KEY_PREFIX: &str = "s3b";
+
+/// Directory under the user's home holding default key files -- `~/.s3b` on
+/// macOS/Linux, `%USERPROFILE%\.s3b` on Windows. Checked for `s3b.pub` when
+/// `S3BPUBKEY`/`S3B-PUBKEY` aren't set, and for `s3b.key` when `-key` isn't
+/// given on restore; also where `genkey` writes by default.
+pub const DEFAULT_KEY_DIR: &str = ".s3b";
+pub const DEFAULT_PUBKEY_FILENAME: &str = "s3b.pub";
+pub const DEFAULT_PRIVKEY_FILENAME: &str = "s3b.key";
 
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut buf = [0u8; N];
@@ -160,15 +167,24 @@ pub fn generate_keypair() -> KeyPair {
 }
 
 /// `-action genkey [-out <prefix>]`: generates a keypair and writes
-/// `<prefix>.pub` / `<prefix>.key` (base64-encoded raw key bytes). `prefix`
-/// is `DEFAULT_KEY_PREFIX` ("s3b") when the caller (main.rs) didn't get an
-/// explicit `-out`. The private key file is restricted to owner-only
-/// permissions on write.
-pub fn genkey(prefix: &str) -> Result<(), AppError> {
+/// `<prefix>.pub` / `<prefix>.key` (base64-encoded raw key bytes). When
+/// `-out` is omitted (`prefix` is `None`), defaults to `~/.s3b/s3b` --
+/// creating `~/.s3b` if it doesn't exist -- which is the same location
+/// `resolve_and_load_public_key`/`resolve_private_key_path` fall back to
+/// when `S3BPUBKEY`/`-key` aren't set, so a bare `genkey` followed by a bare
+/// `backup`/`restore` works with no further configuration. The private key
+/// file -- and, on Unix, a freshly created `~/.s3b` directory -- is
+/// restricted to owner-only permissions on write.
+pub fn genkey(prefix: Option<&str>) -> Result<(), AppError> {
+    let prefix_path = match prefix {
+        Some(p) => PathBuf::from(p),
+        None => default_genkey_prefix()?,
+    };
+
     let kp = generate_keypair();
 
-    let pub_path = format!("{prefix}.pub");
-    let key_path = format!("{prefix}.key");
+    let pub_path = format!("{}.pub", prefix_path.display());
+    let key_path = format!("{}.key", prefix_path.display());
 
     std::fs::write(&pub_path, STANDARD.encode(kp.public)).map_err(|e| AppError::io(&pub_path, e))?;
     std::fs::write(&key_path, STANDARD.encode(kp.private)).map_err(|e| AppError::io(&key_path, e))?;
@@ -179,23 +195,38 @@ pub fn genkey(prefix: &str) -> Result<(), AppError> {
         "wrote private key: {key_path} (permissions restricted to owner)"
     ));
     info(format!(
-        "distribute {pub_path} to every host that performs backups (export S3BPUBKEY=<path>); \
+        "distribute {pub_path} to every host that performs backups (export S3BPUBKEY=<path> \
+         if it's not at the default ~/{DEFAULT_KEY_DIR}/{DEFAULT_PUBKEY_FILENAME} location); \
          keep {key_path} only wherever restores are actually performed"
     ));
     Ok(())
 }
 
+/// `~/.s3b/s3b` (creating `~/.s3b`, owner-only on Unix, if it doesn't
+/// already exist), used as the `genkey` prefix when `-out` is omitted.
+fn default_genkey_prefix() -> Result<PathBuf, AppError> {
+    let dir = default_key_dir().ok_or_else(|| {
+        AppError::Config(
+            "no home directory could be resolved to determine a default key location \
+             (set HOME or USERPROFILE, or pass -out <prefix> explicitly)"
+                .into(),
+        )
+    })?;
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
+    restrict_dir_to_owner(&dir).map_err(|e| AppError::io(&dir, e))?;
+    Ok(dir.join(DEFAULT_KEY_PREFIX))
+}
+
 /// Resolves the public key path from `S3BPUBKEY`/`S3B-PUBKEY`, falling back
-/// to `~/s3b.pub` (matching `genkey`'s default `-out` prefix) if neither is
-/// set, and loads it. Called from the backup pipeline; `genkey` and
-/// `restore` don't need it.
+/// to `~/.s3b/s3b.pub` if neither is set, and loads it. Called from the
+/// backup pipeline; `genkey` and `restore` don't need it.
 pub fn resolve_and_load_public_key() -> Result<[u8; 32], AppError> {
     let path = match PUBKEY_ENV.iter().find_map(|name| std::env::var(name).ok()) {
         Some(p) => PathBuf::from(p),
         None => default_pubkey_path().ok_or_else(|| {
             AppError::Config(format!(
                 "no public key configured: set {} (or {}) to the path of a .pub file written by 'genkey', \
-                 and no home directory could be resolved to fall back to ~/{DEFAULT_KEY_PREFIX}.pub",
+                 and no home directory could be resolved to fall back to ~/{DEFAULT_KEY_DIR}/{DEFAULT_PUBKEY_FILENAME}",
                 PUBKEY_ENV[0], PUBKEY_ENV[1]
             ))
         })?,
@@ -203,13 +234,40 @@ pub fn resolve_and_load_public_key() -> Result<[u8; 32], AppError> {
     load_public_key(&path)
 }
 
-/// `~/<DEFAULT_KEY_PREFIX>.pub`, or `None` if no home directory can be
-/// resolved. Hand-rolled rather than pulling in the `dirs` crate, matching
-/// the "minimize dependencies" goal -- same spirit as `config::hostname_fallback`.
+/// Resolves the private key path for restore: `explicit` (the `-key` CLI
+/// flag) if given, else `~/.s3b/s3b.key`. Mirrors
+/// `resolve_and_load_public_key`'s fallback, and the location `genkey`
+/// writes to by default.
+pub fn resolve_private_key_path(explicit: Option<&Path>) -> Result<PathBuf, AppError> {
+    match explicit {
+        Some(p) => Ok(p.to_path_buf()),
+        None => default_privkey_path().ok_or_else(|| {
+            AppError::Config(format!(
+                "no private key configured: pass -key <path>, and no home directory could be \
+                 resolved to fall back to ~/{DEFAULT_KEY_DIR}/{DEFAULT_PRIVKEY_FILENAME}"
+            ))
+        }),
+    }
+}
+
+/// `~/.s3b/s3b.pub`, or `None` if no home directory can be resolved.
 fn default_pubkey_path() -> Option<PathBuf> {
+    default_key_dir().map(|d| d.join(DEFAULT_PUBKEY_FILENAME))
+}
+
+/// `~/.s3b/s3b.key`, or `None` if no home directory can be resolved.
+fn default_privkey_path() -> Option<PathBuf> {
+    default_key_dir().map(|d| d.join(DEFAULT_PRIVKEY_FILENAME))
+}
+
+/// `~/.s3b` (`%USERPROFILE%\.s3b` on Windows), or `None` if neither `HOME`
+/// nor `USERPROFILE` is set. Hand-rolled rather than pulling in the `dirs`
+/// crate, matching the "minimize dependencies" goal -- same spirit as
+/// `config::hostname_fallback`.
+fn default_key_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE")) // Windows
-        .map(|home| PathBuf::from(home).join(format!("{DEFAULT_KEY_PREFIX}.pub")))
+        .map(|home| PathBuf::from(home).join(DEFAULT_KEY_DIR))
 }
 
 pub fn load_public_key(path: &Path) -> Result<[u8; 32], AppError> {
@@ -217,9 +275,11 @@ pub fn load_public_key(path: &Path) -> Result<[u8; 32], AppError> {
     decode_key(text.trim(), path)
 }
 
-/// Loads the private key from `path` (the `-key` CLI flag on restore),
-/// refusing to use it if the file is readable by anyone but its owner --
-/// the same posture OpenSSH takes toward `~/.ssh/id_*` files.
+/// Loads the private key from `path` (resolved by
+/// `resolve_private_key_path` from the `-key` CLI flag or the
+/// `~/.s3b/s3b.key` default), refusing to use it if the file is readable by
+/// anyone but its owner -- the same posture OpenSSH takes toward
+/// `~/.ssh/id_*` files.
 pub fn load_private_key(path: &Path) -> Result<[u8; 32], AppError> {
     check_private_key_permissions(path)?;
     let text = std::fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
@@ -250,6 +310,21 @@ fn restrict_to_owner(_path: &str) -> std::io::Result<()> {
     // TODO: apply an equivalent owner-only ACL on Windows (icacls) before
     // this ships there. macOS/Linux are s3b's other stated target platforms
     // and are handled above via POSIX permission bits.
+    Ok(())
+}
+
+/// Same intent as `restrict_to_owner`, but for the `~/.s3b` directory itself
+/// when `genkey`/lookup default logic creates it.
+#[cfg(unix)]
+fn restrict_dir_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn restrict_dir_to_owner(_path: &Path) -> std::io::Result<()> {
+    // Same Windows caveat as restrict_to_owner: TODO an equivalent icacls
+    // ACL before shipping there.
     Ok(())
 }
 
@@ -347,11 +422,12 @@ mod tests {
         assert!(matches!(err, AppError::Crypto(_)));
     }
 
-    // Both env-mutating checks live in one test (rather than two) to avoid a
-    // parallel-test race on the process-global HOME/S3BPUBKEY/S3B-PUBKEY env
-    // vars; original values are restored afterward regardless of outcome.
+    // All env-mutating checks for the ~/.s3b default-key-location logic live
+    // in one test (rather than several) to avoid a parallel-test race on the
+    // process-global HOME/S3BPUBKEY/S3B-PUBKEY env vars; original values are
+    // restored afterward regardless of outcome.
     #[test]
-    fn default_pubkey_path_and_env_fallback() {
+    fn default_key_dir_pubkey_privkey_and_genkey_fallback() {
         let saved: Vec<(&str, Option<String>)> = ["HOME", "S3BPUBKEY", "S3B-PUBKEY"]
             .iter()
             .map(|n| (*n, std::env::var(n).ok()))
@@ -372,17 +448,35 @@ mod tests {
             std::env::remove_var("S3BPUBKEY");
             std::env::remove_var("S3B-PUBKEY");
 
-            // default_pubkey_path() resolves to $HOME/s3b.pub without
-            // requiring the file to exist yet.
-            let expected = home.path().join("s3b.pub");
-            assert_eq!(default_pubkey_path(), Some(expected.clone()));
+            // default_pubkey_path()/default_privkey_path() resolve under
+            // $HOME/.s3b without requiring the file (or the directory) to
+            // exist yet.
+            let expected_pub = home.path().join(".s3b").join("s3b.pub");
+            let expected_key = home.path().join(".s3b").join("s3b.key");
+            assert_eq!(default_pubkey_path(), Some(expected_pub.clone()));
+            assert_eq!(default_privkey_path(), Some(expected_key.clone()));
 
-            // resolve_and_load_public_key() actually reads it: write a
-            // genkey-shaped .pub file there and confirm the fallback loads it.
-            let kp = generate_keypair();
-            std::fs::write(&expected, STANDARD.encode(kp.public)).unwrap();
+            // resolve_private_key_path: explicit path wins; None falls back
+            // to the default.
+            let explicit = home.path().join("elsewhere.key");
+            assert_eq!(
+                resolve_private_key_path(Some(&explicit)).unwrap(),
+                explicit
+            );
+            assert_eq!(resolve_private_key_path(None).unwrap(), expected_key);
+
+            // genkey(None) creates ~/.s3b and writes both files there.
+            genkey(None).unwrap();
+            assert!(expected_pub.exists());
+            assert!(expected_key.exists());
+
+            // resolve_and_load_public_key() picks up the file genkey just
+            // wrote via the same default-path fallback.
             let loaded = resolve_and_load_public_key().unwrap();
-            assert_eq!(loaded, kp.public);
+            let expected_pub_bytes = STANDARD
+                .decode(std::fs::read_to_string(&expected_pub).unwrap().trim())
+                .unwrap();
+            assert_eq!(loaded.to_vec(), expected_pub_bytes);
         });
 
         restore();

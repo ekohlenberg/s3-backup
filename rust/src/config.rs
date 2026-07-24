@@ -8,9 +8,18 @@
 //! more external commands to template into.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::crypto::DEFAULT_KEY_DIR;
 use crate::error::AppError;
+
+/// Filename (under `DEFAULT_KEY_DIR`, i.e. `~/.s3b`) of the fallback file
+/// for AWS credentials/region and the default bucket -- `key=value` lines,
+/// one per line, checked when the corresponding environment variable or
+/// `-bucket` flag isn't set. Same "check env/CLI first, fall back to a file
+/// under `~/.s3b`" pattern as `crypto::resolve_private_key_path`.
+const AWS_CREDENTIALS_FILENAME: &str = "s3b.aws";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -76,6 +85,9 @@ pub struct Config {
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
     pub aws_session_token: Option<String>,
+    /// `BUCKET` from `~/.s3b/s3b.aws`, if present. Used as the fallback
+    /// target bucket when `-bucket` isn't given -- see `resolve_bucket`.
+    pub bucket: Option<String>,
 }
 
 fn env_first(names: &[&str]) -> Option<String> {
@@ -89,16 +101,79 @@ fn env_first(names: &[&str]) -> Option<String> {
     None
 }
 
+/// Parses `s3b.aws`-style content: `key=value` pairs, one per line, with
+/// blank lines and lines starting with `#` ignored. Whitespace around the
+/// key and value is trimmed, so `KEY = value` and `KEY=value` both work.
+fn parse_aws_file(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    map
+}
+
+/// Reads and parses the AWS credentials/bucket fallback file at `path`, or
+/// returns an empty map if it doesn't exist (not finding the file is not an
+/// error -- it's an optional fallback, checked only after the environment
+/// and CLI flags come up empty).
+fn load_aws_file_at(path: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .map(|text| parse_aws_file(&text))
+        .unwrap_or_default()
+}
+
+/// `~/.s3b/s3b.aws` under the given home directory.
+fn aws_file_path_from_home(home: &Path) -> PathBuf {
+    home.join(DEFAULT_KEY_DIR).join(AWS_CREDENTIALS_FILENAME)
+}
+
+/// `~/.s3b/s3b.aws` (`%USERPROFILE%\.s3b\s3b.aws` on Windows), or `None` if
+/// neither `HOME` nor `USERPROFILE` is set. Mirrors
+/// `crypto::default_key_dir`'s env-var fallback order.
+fn aws_file_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| aws_file_path_from_home(Path::new(&home)))
+}
+
+/// Loads `~/.s3b/s3b.aws` (see `aws_file_path`), or an empty map if it
+/// doesn't exist or no home directory can be resolved.
+fn load_aws_file() -> HashMap<String, String> {
+    aws_file_path()
+        .map(|p| load_aws_file_at(&p))
+        .unwrap_or_default()
+}
+
+/// Looks up the first of `names` present in `map`, mirroring `env_first`'s
+/// "first match wins" order -- used to accept more than one key name for
+/// the same setting (e.g. `AWS_ACCESS_KEY_ID` and the shorter
+/// `AWS_ACCESS_KEY`).
+fn file_lookup(map: &HashMap<String, String>, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|n| map.get(*n)).cloned()
+}
+
 impl Config {
     /// Loads `<config_path>` (or defaults if absent), then resolves
     /// everything that must come from the environment: AWS credentials.
-    /// Fails fast (before any pipeline work starts) if any required value is
-    /// missing, matching the original "fail before any work starts"
-    /// behavior. The recipient public/private key paths are *not* resolved
-    /// here -- `genkey` needs neither, `backup` resolves the public key
-    /// itself via `crypto::resolve_and_load_public_key`, and `restore`
-    /// receives the private key path directly from the `-key` CLI flag --
-    /// so a bare `Config` no longer implies "a key secret is available."
+    /// When `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION` aren't
+    /// set in the environment, falls back to the matching `key=value` line
+    /// in `~/.s3b/s3b.aws` (`AWS_ACCESS_KEY` is also accepted there as a
+    /// shorter alias for `AWS_ACCESS_KEY_ID`); the same file's `BUCKET` line
+    /// is read into `Config::bucket` as the `-bucket` fallback (see
+    /// `resolve_bucket`). Fails fast (before any pipeline work starts) if
+    /// a required value is missing from every source, matching the original
+    /// "fail before any work starts" behavior. The recipient public/private
+    /// key paths are *not* resolved here -- `genkey` needs neither, `backup`
+    /// resolves the public key itself via `crypto::resolve_and_load_public_key`,
+    /// and `restore` resolves the private key path via
+    /// `crypto::resolve_private_key_path` -- so a bare `Config` no longer
+    /// implies "a key secret is available."
     pub fn load(config_path: Option<&str>) -> Result<Config, AppError> {
         let file_cfg: FileConfig = match config_path {
             Some(p) => {
@@ -119,10 +194,24 @@ impl Config {
             }
         };
 
+        let aws_file = load_aws_file();
+
         let aws_access_key_id = env_first(&["AWS_ACCESS_KEY_ID"])
-            .ok_or_else(|| AppError::Config("AWS_ACCESS_KEY_ID is not set".into()))?;
+            .or_else(|| file_lookup(&aws_file, &["AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY"]))
+            .ok_or_else(|| {
+                AppError::Config(
+                    "AWS_ACCESS_KEY_ID is not set (checked the environment and ~/.s3b/s3b.aws)"
+                        .into(),
+                )
+            })?;
         let aws_secret_access_key = env_first(&["AWS_SECRET_ACCESS_KEY"])
-            .ok_or_else(|| AppError::Config("AWS_SECRET_ACCESS_KEY is not set".into()))?;
+            .or_else(|| file_lookup(&aws_file, &["AWS_SECRET_ACCESS_KEY"]))
+            .ok_or_else(|| {
+                AppError::Config(
+                    "AWS_SECRET_ACCESS_KEY is not set (checked the environment and ~/.s3b/s3b.aws)"
+                        .into(),
+                )
+            })?;
         let aws_session_token = env_first(&["AWS_SESSION_TOKEN"]);
 
         let hostname = file_cfg
@@ -138,7 +227,11 @@ impl Config {
             .or_else(|| env_first(&["USER", "USERNAME"]))
             .unwrap_or_else(|| "unknown-user".to_string());
 
-        let region = env_first(&["AWS_REGION", "AWS_DEFAULT_REGION"]).unwrap_or(file_cfg.region);
+        let region = env_first(&["AWS_REGION", "AWS_DEFAULT_REGION"])
+            .or_else(|| file_lookup(&aws_file, &["AWS_REGION"]))
+            .unwrap_or(file_cfg.region);
+
+        let bucket = file_lookup(&aws_file, &["BUCKET"]);
 
         Ok(Config {
             temp_dir: PathBuf::from(file_cfg.temp_dir),
@@ -150,8 +243,27 @@ impl Config {
             aws_access_key_id,
             aws_secret_access_key,
             aws_session_token,
+            bucket,
         })
     }
+
+    /// Resolves the target bucket: `explicit` (the `-bucket` CLI flag) if
+    /// given, else `self.bucket` (the `BUCKET` line from `~/.s3b/s3b.aws`,
+    /// loaded by `Config::load`). Mirrors
+    /// `crypto::resolve_private_key_path`'s explicit-flag-then-file-fallback
+    /// shape.
+    pub fn resolve_bucket(&self, explicit: Option<&str>) -> Result<String, AppError> {
+        resolve_bucket_from(explicit, self.bucket.as_deref())
+    }
+}
+
+fn resolve_bucket_from(explicit: Option<&str>, file_bucket: Option<&str>) -> Result<String, AppError> {
+    explicit.or(file_bucket).map(str::to_string).ok_or_else(|| {
+        AppError::Config(
+            "no bucket configured: pass -bucket <name>, or set BUCKET=<name> in ~/.s3b/s3b.aws"
+                .into(),
+        )
+    })
 }
 
 /// Best-effort hostname lookup for when neither the config file nor
@@ -205,5 +317,79 @@ mod tests {
             Some("value-b".to_string())
         );
         std::env::remove_var("S3B_TEST_B");
+    }
+
+    #[test]
+    fn parse_aws_file_reads_key_value_lines_ignoring_blanks_and_comments() {
+        let text = "AWS_ACCESS_KEY_ID=AKIA123\n\
+             # a comment line\n\
+             \n\
+             AWS_SECRET_ACCESS_KEY = super-secret\n\
+             BUCKET=my-bucket\n\
+             AWS_REGION=us-west-2\n";
+        let map = parse_aws_file(text);
+        assert_eq!(map.get("AWS_ACCESS_KEY_ID").map(String::as_str), Some("AKIA123"));
+        // Whitespace around '=' is trimmed on both sides.
+        assert_eq!(
+            map.get("AWS_SECRET_ACCESS_KEY").map(String::as_str),
+            Some("super-secret")
+        );
+        assert_eq!(map.get("BUCKET").map(String::as_str), Some("my-bucket"));
+        assert_eq!(map.get("AWS_REGION").map(String::as_str), Some("us-west-2"));
+        assert_eq!(map.len(), 4, "blank line and comment must not produce entries");
+    }
+
+    #[test]
+    fn file_lookup_checks_names_in_order() {
+        let mut map = HashMap::new();
+        map.insert("AWS_ACCESS_KEY".to_string(), "alias-value".to_string());
+        assert_eq!(
+            file_lookup(&map, &["AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY"]).as_deref(),
+            Some("alias-value")
+        );
+
+        map.insert("AWS_ACCESS_KEY_ID".to_string(), "canonical-value".to_string());
+        assert_eq!(
+            file_lookup(&map, &["AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY"]).as_deref(),
+            Some("canonical-value"),
+            "earlier name in the list wins when both are present"
+        );
+
+        assert_eq!(file_lookup(&map, &["NOT_PRESENT"]), None);
+    }
+
+    #[test]
+    fn aws_file_path_from_home_is_dot_s3b_s3b_aws() {
+        let p = aws_file_path_from_home(Path::new("/home/eric"));
+        assert_eq!(p, PathBuf::from("/home/eric/.s3b/s3b.aws"));
+    }
+
+    #[test]
+    fn load_aws_file_at_parses_existing_file_and_defaults_missing_file_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s3b.aws");
+        std::fs::write(&path, "BUCKET=from-file\n").unwrap();
+
+        let map = load_aws_file_at(&path);
+        assert_eq!(map.get("BUCKET").map(String::as_str), Some("from-file"));
+
+        let missing = load_aws_file_at(&dir.path().join("does-not-exist"));
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn resolve_bucket_prefers_explicit_then_file_then_errors() {
+        assert_eq!(
+            resolve_bucket_from(Some("cli-bucket"), Some("file-bucket")).unwrap(),
+            "cli-bucket"
+        );
+        assert_eq!(
+            resolve_bucket_from(None, Some("file-bucket")).unwrap(),
+            "file-bucket"
+        );
+        assert!(matches!(
+            resolve_bucket_from(None, None).unwrap_err(),
+            AppError::Config(_)
+        ));
     }
 }

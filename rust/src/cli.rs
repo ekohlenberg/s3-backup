@@ -14,7 +14,9 @@ pub enum Action {
 #[derive(Debug, Clone)]
 pub struct Args {
     pub action: Action,
-    /// Required for backup/restore; unused for genkey.
+    /// Optional for backup/restore: target S3 bucket. Falls back to
+    /// `BUCKET=<name>` in `~/.s3b/s3b.aws` (`config::Config::resolve_bucket`)
+    /// when omitted; unused for genkey.
     pub bucket: Option<String>,
     /// Required for backup.
     pub folder: Option<String>,
@@ -23,7 +25,8 @@ pub struct Args {
     pub config_path: Option<String>,
     /// Required for genkey: the `<prefix>` written to `<prefix>.pub`/`<prefix>.key`.
     pub out: Option<String>,
-    /// Required for restore: path to the private key file.
+    /// Optional for restore: path to the private key file. Falls back to
+    /// `~/.s3b/s3b.key` (`crypto::resolve_private_key_path`) when omitted.
     pub key: Option<String>,
     /// `-force`, backup only: upload every folder regardless of the
     /// content-hash change check.
@@ -42,9 +45,14 @@ const BOOLEAN_FLAGS: &[&str] = &["force"];
 /// - any `-flag` with no following non-dash token is invalid, *except* the
 ///   flags listed in `BOOLEAN_FLAGS`, which take no value at all
 /// - `-action` is required and must be exactly `backup`, `restore`, or `genkey`
-/// - `backup` requires `-bucket` and `-folder`; `-force` is optional
-/// - `restore` requires `-bucket` and `-key`; `-object` is optional
-/// - `genkey`'s `-out` is optional (defaults to `crypto::DEFAULT_KEY_PREFIX`)
+/// - `backup` requires `-folder`; `-bucket` and `-force` are optional --
+///   `-bucket` falls back to `BUCKET=<name>` in `~/.s3b/s3b.aws`
+///   (`config::Config::resolve_bucket`)
+/// - `restore` has no required flags -- `-bucket`, `-key`, and `-object` are
+///   all optional; `-bucket` falls back the same way as for `backup`, and
+///   `-key` falls back to `~/.s3b/s3b.key` (`crypto::resolve_private_key_path`)
+/// - `genkey`'s `-out` is optional (defaults to `~/.s3b/s3b`,
+///   `crypto::DEFAULT_KEY_PREFIX` under `crypto::DEFAULT_KEY_DIR`)
 pub fn parse(argv: &[String]) -> Result<Args, AppError> {
     let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut force = false;
@@ -103,22 +111,20 @@ pub fn parse(argv: &[String]) -> Result<Args, AppError> {
 
     match action {
         Action::Backup => {
-            if bucket.is_none() {
-                return Err(AppError::Usage("-bucket is required for -action backup".into()));
-            }
             if folder.is_none() {
                 return Err(AppError::Usage("-folder is required for -action backup".into()));
             }
+            // -bucket is optional here; if omitted, main.rs resolves it via
+            // Config::resolve_bucket (falls back to BUCKET=<name> in
+            // ~/.s3b/s3b.aws), which reports a Config error of its own if
+            // that can't be resolved either.
         }
         Action::Restore => {
-            if bucket.is_none() {
-                return Err(AppError::Usage("-bucket is required for -action restore".into()));
-            }
-            if key.is_none() {
-                return Err(AppError::Usage(
-                    "-key <private_key_file> is required for -action restore".into(),
-                ));
-            }
+            // -bucket is optional here (see the Backup arm above); -key is
+            // optional too -- if omitted, main.rs resolves it via
+            // crypto::resolve_private_key_path (falls back to
+            // ~/.s3b/s3b.key), which reports a Config error of its own if
+            // that can't be resolved either.
         }
         Action::Genkey => {
             // -out is optional here; the default prefix is applied at the
@@ -153,9 +159,14 @@ mod tests {
     }
 
     #[test]
-    fn backup_requires_bucket() {
-        let err = parse(&v(&["-action", "backup", "-folder", "/tmp/x"])).unwrap_err();
-        assert!(matches!(err, AppError::Usage(_)));
+    fn backup_bucket_optional_at_parse_time() {
+        // -bucket is no longer required by cli::parse itself -- main.rs
+        // falls back to BUCKET=<name> in ~/.s3b/s3b.aws
+        // (config::Config::resolve_bucket) when it's omitted, and reports
+        // its own error if that's not set either.
+        let a = parse(&v(&["-action", "backup", "-folder", "/tmp/x"])).unwrap();
+        assert_eq!(a.action, Action::Backup);
+        assert_eq!(a.bucket, None);
     }
 
     #[test]
@@ -197,9 +208,13 @@ mod tests {
     }
 
     #[test]
-    fn restore_requires_key() {
-        let err = parse(&v(&["-action", "restore", "-bucket", "b"])).unwrap_err();
-        assert!(matches!(err, AppError::Usage(_)));
+    fn restore_key_optional_at_parse_time() {
+        // -key is no longer required by cli::parse itself -- main.rs resolves
+        // a default (~/.s3b/s3b.key) via crypto::resolve_private_key_path
+        // when it's omitted, and reports its own error if that fails too.
+        let a = parse(&v(&["-action", "restore", "-bucket", "b"])).unwrap();
+        assert_eq!(a.action, Action::Restore);
+        assert_eq!(a.key, None);
     }
 
     #[test]

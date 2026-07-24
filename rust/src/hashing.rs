@@ -107,25 +107,26 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// MD5 hex digest of a byte slice, used solely to verify S3's returned ETag
-/// for a single-part, non-SSE-KMS PUT (where ETag == MD5 of the uploaded
-/// bytes). This is not used for anything security-sensitive.
-pub fn md5_hex(bytes: &[u8]) -> String {
-    use md5::{Digest as _, Md5};
-    let mut hasher = Md5::new();
+/// Base64-encoded SHA-256 digest of a byte slice, in the form S3's
+/// `x-amz-checksum-sha256` request/response header expects. Used to verify
+/// upload integrity: we send this as a request header so S3 rejects the PUT
+/// outright on a mismatch, and we also compare it against the
+/// `x-amz-checksum-sha256` value S3 echoes back in the response.
+pub fn sha256_base64(bytes: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hex::encode(hasher.finalize())
+    STANDARD.encode(hasher.finalize())
 }
 
-/// Streaming MD5 for large files, avoiding a full second in-memory copy.
+/// Streaming SHA-256 for large files, avoiding a full second in-memory copy.
 /// Not currently called -- `backup.rs` verifies against the ciphertext it
 /// already holds in memory -- but kept as the natural entry point if a
 /// future change verifies from disk instead (e.g. re-checking an
 /// already-uploaded object without holding the whole thing in memory).
 #[allow(dead_code)]
-pub fn md5_hex_reader<R: Read>(mut r: R) -> std::io::Result<String> {
-    use md5::{Digest as _, Md5};
-    let mut hasher = Md5::new();
+pub fn sha256_hex_reader<R: Read>(mut r: R) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = r.read(&mut buf)?;
@@ -194,20 +195,22 @@ mod tests {
     }
 
     #[test]
-    fn md5_matches_known_vector() {
-        // MD5("") = d41d8cd98f00b204e9800998ecf8427e
-        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
-        // MD5("abc") = 900150983cd24fb0d6963f7d28e17f72
-        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
-    }
-
-    #[test]
     fn sha256_matches_known_vector() {
         // SHA-256("abc"), verified against `python3 -c "import hashlib;
         // print(hashlib.sha256(b'abc').hexdigest())"`.
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn sha256_base64_matches_known_vector() {
+        // base64(sha256("abc")), verified against `python3 -c "import
+        // hashlib, base64; print(base64.b64encode(hashlib.sha256(b'abc').digest()).decode())"`.
+        assert_eq!(
+            sha256_base64(b"abc"),
+            "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
         );
     }
 }

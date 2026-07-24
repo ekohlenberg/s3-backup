@@ -7,7 +7,8 @@
 //!   manifest, not folder-level `LastWriteTime`.
 //! - There's no local database: "already backed up and current" is answered
 //!   by a HEAD request reading the previous run's `source-hash` metadata.
-//! - Upload verification is inline (via the PUT response's ETag), not a
+//! - Upload verification is inline (via a client-sent `x-amz-checksum-sha256`
+//!   digest that S3 validates and echoes back on the PUT response), not a
 //!   separate `aws s3 ls` reconciliation pass after the fact.
 //! - A folder is never considered backed up until verification succeeds --
 //!   fail closed, per the bulletproofing checklist.
@@ -230,25 +231,41 @@ fn process_folder(
 
     let put_result = upload_result?;
 
-    // Verify before considering this folder backed up. Plain 32-hex-char
-    // ETags are the MD5 of the uploaded bytes for a single-part PUT with no
-    // server-side encryption; some S3-compatible providers or bucket-level
-    // SSE configurations return a different ETag shape we can't independently
-    // recompute, so we only *reject* on a definite mismatch and otherwise
-    // accept a non-empty ETag as confirmation the object exists.
-    if put_result.etag.len() == 32 && put_result.etag.chars().all(|c| c.is_ascii_hexdigit()) {
-        let expected = hashing::md5_hex(&ciphertext);
-        if put_result.etag != expected {
+    info(format!("verifying upload of {object_key}..."));
+
+    // Verify before considering this folder backed up. We send a
+    // client-computed SHA-256 digest as `x-amz-checksum-sha256` on the PUT
+    // (see `S3Client::put_object`), so S3 itself already rejected the
+    // request with an error -- caught by `upload_result?` above -- if the
+    // bytes it received didn't match. This is a defense-in-depth check on
+    // top of that: confirm the digest S3 echoes back in the response still
+    // matches what we sent, and fail closed if the provider didn't return
+    // one at all (e.g. an S3-compatible provider without checksum support),
+    // since in that case nothing has actually verified the upload.
+    match &put_result.checksum_sha256 {
+        Some(actual) => {
+            let expected = hashing::sha256_base64(&ciphertext);
+            if *actual != expected {
+                return Err(AppError::S3(format!(
+                    "upload verification failed for {object_key}: expected SHA-256 checksum {expected}, got {actual}"
+                )));
+            }
+        }
+        None => {
             return Err(AppError::S3(format!(
-                "upload verification failed for {object_key}: expected ETag {expected}, got {}",
-                put_result.etag
+                "upload verification failed for {object_key}: no x-amz-checksum-sha256 returned"
             )));
         }
-    } else if put_result.etag.is_empty() {
-        return Err(AppError::S3(format!(
-            "upload verification failed for {object_key}: no ETag returned"
-        )));
     }
+
+    // ETag isn't used for verification (see above), but is logged as an
+    // audit-trail detail -- it's the identifier `aws s3api head-object` or
+    // the S3 console shows for this object, handy for cross-referencing a
+    // run's log output against the bucket after the fact.
+    info(format!(
+        "upload verified for {object_key} (ETag {})",
+        put_result.etag
+    ));
 
     Ok(ProcessOutcome::Uploaded)
 }

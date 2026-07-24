@@ -1,5 +1,5 @@
-   0.073131458s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint: fingerprint error for s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust)/Check { test: false }/TargetInner { name: "s3b", doc: true, ..: with_path("/Users/erickohlenberg/src/s3-backup/rust/src/main.rs", Edition2021) }
-   0.073157208s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/erickohlenberg/src/s3-backup/rust/target/debug/.fingerprint/s3b-7c2d0b3ba4f2bc29/bin-s3b`
+   0.076247416s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint: fingerprint error for s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust)/Check { test: false }/TargetInner { name: "s3b", doc: true, ..: with_path("/Users/erickohlenberg/src/s3-backup/rust/src/main.rs", Edition2021) }
+   0.076273833s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/erickohlenberg/src/s3-backup/rust/target/debug/.fingerprint/s3b-3e2121ecf81f4ab8/bin-s3b`
 
 Caused by:
     No such file or directory (os error 2)
@@ -22,8 +22,8 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.093181333s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint: fingerprint error for s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust)/Check { test: true }/TargetInner { name: "s3b", doc: true, ..: with_path("/Users/erickohlenberg/src/s3-backup/rust/src/main.rs", Edition2021) }
-   0.093194250s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/erickohlenberg/src/s3-backup/rust/target/debug/.fingerprint/s3b-41222c0a1f318c54/test-bin-s3b`
+   0.114198000s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint: fingerprint error for s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust)/Check { test: true }/TargetInner { name: "s3b", doc: true, ..: with_path("/Users/erickohlenberg/src/s3-backup/rust/src/main.rs", Edition2021) }
+   0.114217500s  INFO prepare_target{force=false package_id=s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust) target="s3b"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/erickohlenberg/src/s3-backup/rust/target/debug/.fingerprint/s3b-20d75b6362de9590/test-bin-s3b`
 
 Caused by:
     No such file or directory (os error 2)
@@ -47,6 +47,4 @@ Stack backtrace:
   15: std::rt::lang_start_internal
   16: _main
     Checking s3b v0.1.0 (/Users/erickohlenberg/src/s3-backup/rust)
-error: could not compile `s3b` (bin "s3b") due to 1 previous error
-warning: build failed, waiting for other jobs to finish...
-error: could not compile `s3b` (bin "s3b" test) due to 1 previous error
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.07s

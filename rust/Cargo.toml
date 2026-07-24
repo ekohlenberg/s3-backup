@@ -29,9 +29,9 @@ hkdf = "0.12"
 # Text-safe encoding for the .pub/.key files genkey writes.
 base64 = "0.22"
 
-# Hashing: sha256 for change-detection content hashes, md5 for S3 single-part ETag verification.
+# Hashing: sha256 for change-detection content hashes and S3 upload
+# checksum verification (x-amz-checksum-sha256).
 sha2 = "0.10"
-md-5 = "0.10"
 
 # HMAC-SHA256 for hand-rolled SigV4 request signing.
 hmac = "0.12"

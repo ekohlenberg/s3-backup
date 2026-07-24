@@ -24,20 +24,34 @@ nothing platform-specific to install first.
 ## Usage
 
 ```
-s3b -action backup  -folder <backup_folder> -bucket <s3_bucket>
-s3b -action restore -bucket <s3_bucket> [-object <object>]
+s3b -action backup  -folder <backup_folder> [-bucket <s3_bucket>] [-force]
+s3b -action restore [-bucket <s3_bucket>] [-key <private_key_file>] [-object <object>]
+s3b -action genkey  [-out <key_prefix>]
 ```
 
-Required environment variables:
+`-bucket` and `-key` are optional -- see the fallback files below.
 
-- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optionally
-  `AWS_SESSION_TOKEN`) -- S3 credentials.
-- `S3BPASSFILE` (or `S3B-PASSFILE`) -- path to a file whose contents are used
-  as the encryption passphrase.
+Required, from the environment or `~/.s3b/s3b.aws`:
 
-Optional environment variables:
+- `AWS_ACCESS_KEY_ID` (or the shorter `AWS_ACCESS_KEY`), `AWS_SECRET_ACCESS_KEY`
+  -- S3 credentials. `AWS_SESSION_TOKEN` is read from the environment only.
+
+Optional, from the environment or `~/.s3b/s3b.aws`:
 
 - `AWS_REGION` / `AWS_DEFAULT_REGION` -- defaults to `us-east-1`.
+
+`~/.s3b/s3b.aws` (`%USERPROFILE%\.s3b\s3b.aws` on Windows) is a fallback file
+for anything not set in the environment or on the command line, `key=value`
+per line:
+
+```
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+BUCKET=my-bucket
+```
+
+`BUCKET` there is used whenever `-bucket` is omitted on the command line.
 
 Optional config file (TOML), path via `-config <path>`, or `./s3b.toml` if
 present:
@@ -106,7 +120,7 @@ This follows the migration plan agreed for this port:
 | `src/restore.rs` | Restore orchestration (list, download, decrypt, expand) |
 | `src/archive.rs` | Streaming tar+gzip archive / expand |
 | `src/crypto.rs` | Argon2id key derivation + AES-256-GCM encrypt/decrypt |
-| `src/hashing.rs` | Folder content-hash + MD5 (ETag verification) |
+| `src/hashing.rs` | Folder content-hash + SHA-256 (upload checksum verification) |
 | `src/naming.rs` | Object key naming convention |
 | `src/manifest.rs` | Bucket-resident `_s3b/manifest.json` |
 | `src/s3/` | Hand-rolled SigV4-signed S3 client (PUT/GET/HEAD/List) |

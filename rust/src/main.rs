@@ -55,10 +55,10 @@ fn run(argv: &[String]) -> i32 {
     // key -- it's what *creates* the public key) nor a bucket, so it's
     // handled before Config::load rather than folded into the match below.
     if args.action == cli::Action::Genkey {
-        // -out is optional; defaults to crypto::DEFAULT_KEY_PREFIX ("s3b"),
-        // matching the ~/s3b.pub fallback backup uses when S3BPUBKEY is unset.
-        let out = args.out.as_deref().unwrap_or(crypto::DEFAULT_KEY_PREFIX);
-        return match crypto::genkey(out) {
+        // -out is optional; when omitted, crypto::genkey resolves the
+        // default itself (~/.s3b/s3b, creating ~/.s3b if needed) -- the same
+        // location backup/restore fall back to when S3BPUBKEY/-key are unset.
+        return match crypto::genkey(args.out.as_deref()) {
             Ok(()) => 0,
             Err(e) => {
                 logging::error(format!("{e}"));
@@ -75,18 +75,28 @@ fn run(argv: &[String]) -> i32 {
         }
     };
 
+    // -bucket is optional on the CLI; resolve it once here (falls back to
+    // BUCKET=<name> in ~/.s3b/s3b.aws, loaded into cfg.bucket by
+    // Config::load) since both remaining actions need it.
+    let bucket = match cfg.resolve_bucket(args.bucket.as_deref()) {
+        Ok(b) => b,
+        Err(e) => {
+            logging::error(format!("{e}"));
+            return 1;
+        }
+    };
+
     let result = match args.action {
         cli::Action::Backup => {
-            // Validated by cli::parse: -folder and -bucket are required for backup.
+            // Validated by cli::parse: -folder is required for backup.
             let folder = args.folder.as_deref().expect("cli::parse enforces -folder for backup");
-            let bucket = args.bucket.as_deref().expect("cli::parse enforces -bucket for backup");
-            backup::run(&cfg, folder, bucket, args.force)
+            backup::run(&cfg, folder, &bucket, args.force)
         }
         cli::Action::Restore => {
-            // Validated by cli::parse: -bucket and -key are required for restore.
-            let bucket = args.bucket.as_deref().expect("cli::parse enforces -bucket for restore");
-            let key_path = args.key.as_deref().expect("cli::parse enforces -key for restore");
-            restore::run(&cfg, bucket, args.object.as_deref(), std::path::Path::new(key_path))
+            // -key is optional -- resolve_private_key_path falls back to
+            // ~/.s3b/s3b.key when it's omitted.
+            crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new))
+                .and_then(|key_path| restore::run(&cfg, &bucket, args.object.as_deref(), &key_path))
         }
         cli::Action::Genkey => unreachable!("genkey is handled above, before Config::load"),
     };

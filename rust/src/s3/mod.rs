@@ -17,10 +17,14 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::AppError;
+use crate::hashing;
 use crate::time_util::amz_date_now;
 
 pub struct PutResult {
     pub etag: String,
+    /// The `x-amz-checksum-sha256` value S3 echoes back in the PUT response,
+    /// confirming the digest it validated the uploaded bytes against.
+    pub checksum_sha256: Option<String>,
 }
 
 /// Mirrors the full set of metadata keys `backup.rs` writes on upload (see
@@ -186,13 +190,25 @@ impl S3Client {
         for (k, v) in metadata {
             extra.insert(format!("x-amz-meta-{}", k.to_lowercase()), v.to_string());
         }
+        // Ask S3 to validate the upload against a client-computed SHA-256
+        // digest -- S3 rejects the PUT outright if the bytes it received
+        // don't match, so this catches in-flight corruption before the
+        // object is even considered written, not just after the fact.
+        extra.insert(
+            "x-amz-checksum-sha256".to_string(),
+            hashing::sha256_base64(body),
+        );
         let resp = self.execute("PUT", &uri, &BTreeMap::new(), extra, body)?;
         let etag = resp
             .header("ETag")
             .unwrap_or_default()
             .trim_matches('"')
             .to_string();
-        Ok(PutResult { etag })
+        let checksum_sha256 = resp.header("x-amz-checksum-sha256").map(|s| s.to_string());
+        Ok(PutResult {
+            etag,
+            checksum_sha256,
+        })
     }
 
     pub fn get_object(&self, key: &str) -> Result<Vec<u8>, AppError> {
