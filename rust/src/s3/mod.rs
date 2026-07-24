@@ -23,8 +23,19 @@ use crate::time_util::amz_date_now;
 pub struct PutResult {
     pub etag: String,
     /// The `x-amz-checksum-sha256` value S3 echoes back in the PUT response,
-    /// confirming the digest it validated the uploaded bytes against.
+    /// confirming the digest it validated the uploaded bytes against. For a
+    /// multipart upload this is the *composite* checksum (SHA-256 of the
+    /// concatenated per-part digests, suffixed `-<part_count>`), not a plain
+    /// whole-body SHA-256 -- see `verified`.
     pub checksum_sha256: Option<String>,
+    /// True when this client already validated the upload's integrity
+    /// itself before returning (currently: the multipart path, which checks
+    /// the composite checksum against its own per-part digests before
+    /// `upload_object` returns). Callers that otherwise compare
+    /// `checksum_sha256` against a plain whole-body SHA-256 (as `backup.rs`
+    /// does) must skip that comparison when this is true, since the
+    /// composite format isn't a whole-body digest.
+    pub verified: bool,
 }
 
 /// Mirrors the full set of metadata keys `backup.rs` writes on upload (see
@@ -43,6 +54,10 @@ pub struct ObjectMetadata {
     pub backup_time: Option<String>,
     pub size: u64,
 }
+
+/// S3's own minimum: every part but the last in a multipart upload must be
+/// at least this large, or `CompleteMultipartUpload` rejects the request.
+const MIN_MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 
 pub struct S3Client {
     bucket: String,
@@ -208,7 +223,183 @@ impl S3Client {
         Ok(PutResult {
             etag,
             checksum_sha256,
+            verified: false,
         })
+    }
+
+    /// Uploads `body` to `key`, transparently switching from a single PUT to
+    /// S3 multipart upload once `body` exceeds `threshold` bytes (split into
+    /// `part_size`-byte parts, `MIN_MULTIPART_PART_SIZE` at minimum -- S3
+    /// rejects any non-final part smaller than 5 MiB).
+    ///
+    /// Splitting large uploads into independently-retriable parts is a
+    /// direct fix for connection resets seen uploading large backups over
+    /// flaky network paths (e.g. antivirus/firewall software killing
+    /// long-lived HTTPS connections on Windows): each part is its own
+    /// request, so a single aborted part costs a retry of that part, not
+    /// the whole file, and each request is small enough to usually finish
+    /// before whatever is killing long-lived connections gets the chance.
+    pub fn upload_object(
+        &self,
+        key: &str,
+        body: &[u8],
+        metadata: &[(&str, &str)],
+        threshold: usize,
+        part_size: usize,
+    ) -> Result<PutResult, AppError> {
+        if body.len() <= threshold {
+            return self.put_object(key, body, metadata);
+        }
+
+        let part_size = part_size.max(MIN_MULTIPART_PART_SIZE);
+        let upload_id = self.create_multipart_upload(key, metadata)?;
+
+        match self.upload_parts_and_complete(key, &upload_id, body, part_size) {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                // Best-effort cleanup so a failed upload doesn't leave
+                // orphaned parts billing for storage indefinitely. The
+                // abort's own outcome is deliberately not surfaced here --
+                // the caller needs to see and act on the original failure,
+                // not a secondary one from cleanup.
+                let _ = self.abort_multipart_upload(key, &upload_id);
+                Err(e)
+            }
+        }
+    }
+
+    fn upload_parts_and_complete(
+        &self,
+        key: &str,
+        upload_id: &str,
+        body: &[u8],
+        part_size: usize,
+    ) -> Result<PutResult, AppError> {
+        let mut parts = Vec::new();
+        for (i, chunk) in body.chunks(part_size).enumerate() {
+            let part_number = (i + 1) as u32;
+            parts.push(self.upload_part(key, upload_id, part_number, chunk)?);
+        }
+        self.complete_multipart_upload(key, upload_id, &parts)
+    }
+
+    /// Starts a multipart upload, returning the upload ID S3 assigns. Object
+    /// metadata (`x-amz-meta-*`) is fixed at creation for a multipart
+    /// upload -- there's no later step where it could be attached instead --
+    /// so it's passed here rather than at `complete_multipart_upload`.
+    fn create_multipart_upload(
+        &self,
+        key: &str,
+        metadata: &[(&str, &str)],
+    ) -> Result<String, AppError> {
+        let uri = self.object_uri(key);
+        let mut extra = BTreeMap::new();
+        for (k, v) in metadata {
+            extra.insert(format!("x-amz-meta-{}", k.to_lowercase()), v.to_string());
+        }
+        extra.insert("x-amz-checksum-algorithm".to_string(), "SHA256".to_string());
+
+        let mut query = BTreeMap::new();
+        query.insert("uploads".to_string(), String::new());
+
+        let resp = self.execute("POST", &uri, &query, extra, &[])?;
+        let body = resp
+            .into_string()
+            .map_err(|e| AppError::S3(format!("reading create-multipart-upload response: {e}")))?;
+        xml::parse_upload_id(&body)
+    }
+
+    /// Uploads one part, verifying inline that the `x-amz-checksum-sha256`
+    /// S3 echoes back for this part matches what was sent -- the same
+    /// "reject on mismatch" philosophy `put_object` uses for a whole-body
+    /// upload, applied per part.
+    fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u32,
+        part: &[u8],
+    ) -> Result<xml::CompletedPart, AppError> {
+        let uri = self.object_uri(key);
+        let mut query = BTreeMap::new();
+        query.insert("partNumber".to_string(), part_number.to_string());
+        query.insert("uploadId".to_string(), upload_id.to_string());
+
+        let checksum = hashing::sha256_base64(part);
+        let mut extra = BTreeMap::new();
+        extra.insert("x-amz-checksum-sha256".to_string(), checksum.clone());
+
+        let resp = self.execute("PUT", &uri, &query, extra, part)?;
+        let etag = resp
+            .header("ETag")
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        let returned_checksum = resp.header("x-amz-checksum-sha256").map(str::to_string);
+        if returned_checksum.as_deref() != Some(checksum.as_str()) {
+            return Err(AppError::S3(format!(
+                "part {part_number} of {key} failed checksum verification: sent {checksum}, S3 returned {returned_checksum:?}"
+            )));
+        }
+
+        Ok(xml::CompletedPart {
+            part_number,
+            etag,
+            checksum_sha256: checksum,
+        })
+    }
+
+    /// Finishes a multipart upload, then verifies the composite SHA-256
+    /// checksum S3 reports against the same value computed independently
+    /// from the already-confirmed per-part digests. This is what actually
+    /// proves the assembled object matches what was sent: a correct
+    /// per-part checksum alone doesn't catch parts being combined out of
+    /// order or a part silently dropped during assembly.
+    fn complete_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: &[xml::CompletedPart],
+    ) -> Result<PutResult, AppError> {
+        let uri = self.object_uri(key);
+        let mut query = BTreeMap::new();
+        query.insert("uploadId".to_string(), upload_id.to_string());
+
+        let mut extra = BTreeMap::new();
+        extra.insert("content-type".to_string(), "application/xml".to_string());
+
+        let body = xml::build_complete_multipart_upload_body(parts).into_bytes();
+        let resp = self.execute("POST", &uri, &query, extra, &body)?;
+        let resp_body = resp.into_string().map_err(|e| {
+            AppError::S3(format!("reading complete-multipart-upload response: {e}"))
+        })?;
+        let parsed = xml::parse_complete_multipart_upload(&resp_body)?;
+
+        let expected_composite = composite_sha256_checksum(parts);
+        if parsed.checksum_sha256.as_deref() != Some(expected_composite.as_str()) {
+            return Err(AppError::S3(format!(
+                "multipart upload verification failed for {key}: expected composite SHA-256 {expected_composite}, got {:?}",
+                parsed.checksum_sha256
+            )));
+        }
+
+        Ok(PutResult {
+            etag: parsed.etag,
+            checksum_sha256: parsed.checksum_sha256,
+            verified: true,
+        })
+    }
+
+    /// Best-effort cancellation of an in-progress multipart upload so its
+    /// parts don't linger and bill for storage. Called only as cleanup on
+    /// failure; the caller doesn't (and shouldn't) treat this call's own
+    /// outcome as fatal.
+    fn abort_multipart_upload(&self, key: &str, upload_id: &str) -> Result<(), AppError> {
+        let uri = self.object_uri(key);
+        let mut query = BTreeMap::new();
+        query.insert("uploadId".to_string(), upload_id.to_string());
+        self.execute("DELETE", &uri, &query, BTreeMap::new(), &[])?;
+        Ok(())
     }
 
     pub fn get_object(&self, key: &str) -> Result<Vec<u8>, AppError> {
@@ -284,6 +475,63 @@ impl S3Client {
         }
 
         Ok(all)
+    }
+}
+
+/// Independently recomputes the composite checksum S3 reports for a
+/// completed multipart upload: SHA-256 of the concatenation of each part's
+/// raw (not base64) SHA-256 digest, in part-number order, base64-encoded,
+/// with `-<part_count>` appended -- the format S3's `ChecksumSHA256` takes
+/// for any multipart object, mirroring the long-standing ETag `-<part_count>`
+/// convention. Verified against AWS's own documented worked example in
+/// `mod.rs` tests below.
+fn composite_sha256_checksum(parts: &[xml::CompletedPart]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for p in parts {
+        if let Ok(raw) = STANDARD.decode(&p.checksum_sha256) {
+            hasher.update(&raw);
+        }
+    }
+    format!("{}-{}", STANDARD.encode(hasher.finalize()), parts.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composite_checksum_matches_aws_documented_example() {
+        // From AWS's "Tutorial: Upload an object through multipart upload
+        // and verify its data integrity" (Step 9): three part-level SHA-256
+        // checksums whose decoded-and-concatenated-then-rehashed value is
+        // documented to equal "aI8EoktCdotjU8Bq46DrPCxQCGuGcPIhJ51noWs6hvk=",
+        // matching the ChecksumSHA256 (before the "-3" suffix) that
+        // CompleteMultipartUpload returned for that same upload.
+        let parts = vec![
+            xml::CompletedPart {
+                part_number: 1,
+                etag: "irrelevant-for-this-check".to_string(),
+                checksum_sha256: "QLl8R4i4+SaJlrl8ZIcutc5TbZtwt2NwB8lTXkd3GH0=".to_string(),
+            },
+            xml::CompletedPart {
+                part_number: 2,
+                etag: "irrelevant-for-this-check".to_string(),
+                checksum_sha256: "xCdgs1K5Bm4jWETYw/CmGYr+m6O2DcGfpckx5NVokvE=".to_string(),
+            },
+            xml::CompletedPart {
+                part_number: 3,
+                etag: "irrelevant-for-this-check".to_string(),
+                checksum_sha256: "f5wsfsa5bB+yXuwzqG1Bst91uYneqGD3CCidpb54mAo=".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            composite_sha256_checksum(&parts),
+            "aI8EoktCdotjU8Bq46DrPCxQCGuGcPIhJ51noWs6hvk=-3"
+        );
     }
 }
 

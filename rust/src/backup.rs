@@ -18,7 +18,7 @@
 //!   fresh verified copy without waiting for a real content change.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::archive;
 use crate::config::Config;
@@ -157,8 +157,24 @@ fn process_folder(
 
     // Archive + compress, streaming straight to a temp file (single
     // intermediate file, atomically renamed into place by `create_tar_gz`).
+    // The migration notes collapsed archive and compress into one in-process
+    // step (tar writes directly into the gzip encoder, no intermediate
+    // `.tar` file), so there's one log line for both rather than two that
+    // would imply a separate compress pass that doesn't actually happen.
     let tar_gz_path = cfg.temp_dir.join(format!("{object_key}.tar.gz.tmp"));
+    info(format!(
+        "archiving and compressing {} ({})",
+        folder.display(),
+        if recursive { "recursive" } else { "non-recursive" }
+    ));
+    let archive_start = Instant::now();
     archive::create_tar_gz(folder, recursive, &tar_gz_path)?;
+    let archived_bytes = std::fs::metadata(&tar_gz_path).map(|m| m.len()).unwrap_or(0);
+    info(format!(
+        "archived and compressed {} -> {archived_bytes} bytes ({:.1}s)",
+        folder.display(),
+        archive_start.elapsed().as_secs_f64()
+    ));
 
     let cleanup_tar_gz = |path: &Path| {
         if let Err(e) = std::fs::remove_file(path) {
@@ -177,6 +193,8 @@ fn process_folder(
         }
     };
 
+    info(format!("encrypting {} ({} bytes)", tar_gz_path.display(), plaintext.len()));
+    let encrypt_start = Instant::now();
     let ciphertext = match crypto::encrypt(&plaintext, public_key) {
         Ok(ct) => ct,
         Err(e) => {
@@ -184,6 +202,11 @@ fn process_folder(
             return Err(e);
         }
     };
+    info(format!(
+        "encrypted -> {} bytes ({:.1}s)",
+        ciphertext.len(),
+        encrypt_start.elapsed().as_secs_f64()
+    ));
 
     // Persist the encrypted archive to disk too (atomic .tmp + rename)
     // before uploading, so a crash between encrypt and upload leaves a
@@ -209,12 +232,20 @@ fn process_folder(
         ("backup-time", backup_time.as_str()),
     ];
 
+    let threshold = cfg.multipart_threshold_bytes as usize;
+    let part_size = cfg.multipart_part_size_bytes as usize;
+    let multipart = ciphertext.len() > threshold;
     info(format!(
-        "uploading {} -> {object_key} ({} bytes)",
+        "uploading {} -> {object_key} ({} bytes{})",
         folder.display(),
-        ciphertext.len()
+        ciphertext.len(),
+        if multipart {
+            format!(", multipart in ~{}-byte parts", part_size)
+        } else {
+            String::new()
+        }
     ));
-    let upload_result = client.put_object(&object_key, &ciphertext, &metadata);
+    let upload_result = client.upload_object(&object_key, &ciphertext, &metadata, threshold, part_size);
 
     // Clean up local temp files regardless of upload outcome -- the
     // archive/tar temp file cleanup is intentional (per requirement 4.5);
@@ -233,28 +264,35 @@ fn process_folder(
 
     info(format!("verifying upload of {object_key}..."));
 
-    // Verify before considering this folder backed up. We send a
-    // client-computed SHA-256 digest as `x-amz-checksum-sha256` on the PUT
-    // (see `S3Client::put_object`), so S3 itself already rejected the
-    // request with an error -- caught by `upload_result?` above -- if the
-    // bytes it received didn't match. This is a defense-in-depth check on
-    // top of that: confirm the digest S3 echoes back in the response still
-    // matches what we sent, and fail closed if the provider didn't return
-    // one at all (e.g. an S3-compatible provider without checksum support),
-    // since in that case nothing has actually verified the upload.
-    match &put_result.checksum_sha256 {
-        Some(actual) => {
-            let expected = hashing::sha256_base64(&ciphertext);
-            if *actual != expected {
+    // Verify before considering this folder backed up. For a single PUT, we
+    // send a client-computed SHA-256 digest as `x-amz-checksum-sha256` (see
+    // `S3Client::put_object`), so S3 itself already rejected the request
+    // with an error -- caught by `upload_result?` above -- if the bytes it
+    // received didn't match; the check below is defense-in-depth confirming
+    // the digest S3 echoes back still matches what we sent, and fails
+    // closed if the provider didn't return one at all (e.g. an
+    // S3-compatible provider without checksum support), since in that case
+    // nothing has actually verified the upload.
+    //
+    // For a multipart upload, `put_result.verified` is already `true`:
+    // `S3Client::complete_multipart_upload` checked the composite checksum
+    // itself before returning, and that composite value isn't a plain
+    // whole-body SHA-256, so the comparison below doesn't apply to it.
+    if !put_result.verified {
+        match &put_result.checksum_sha256 {
+            Some(actual) => {
+                let expected = hashing::sha256_base64(&ciphertext);
+                if *actual != expected {
+                    return Err(AppError::S3(format!(
+                        "upload verification failed for {object_key}: expected SHA-256 checksum {expected}, got {actual}"
+                    )));
+                }
+            }
+            None => {
                 return Err(AppError::S3(format!(
-                    "upload verification failed for {object_key}: expected SHA-256 checksum {expected}, got {actual}"
+                    "upload verification failed for {object_key}: no x-amz-checksum-sha256 returned"
                 )));
             }
-        }
-        None => {
-            return Err(AppError::S3(format!(
-                "upload verification failed for {object_key}: no x-amz-checksum-sha256 returned"
-            )));
         }
     }
 

@@ -51,6 +51,19 @@ pub struct FileConfig {
     /// Override for the username embedded in object names / metadata.
     /// Defaults to `$USER`/`$USERNAME`.
     pub username: Option<String>,
+
+    /// Size threshold (bytes) above which an upload switches from a single
+    /// PUT to S3 multipart upload, split into `multipart_part_size_bytes`
+    /// parts. Defaults to the AWS CLI's own multipart threshold, so
+    /// small-file behavior doesn't change from a plain PUT.
+    pub multipart_threshold_bytes: u64,
+
+    /// Size (bytes) of each part when a multipart upload is used. S3
+    /// requires at least 5 MiB for every part but the last and allows at
+    /// most 10,000 parts per object; smaller parts mean more, smaller,
+    /// independently-retriable requests (useful on flaky networks) at the
+    /// cost of more round-trips.
+    pub multipart_part_size_bytes: u64,
 }
 
 impl Default for FileConfig {
@@ -70,6 +83,8 @@ impl Default for FileConfig {
             retry_attempts: 3,
             hostname: None,
             username: None,
+            multipart_threshold_bytes: 8 * 1024 * 1024,
+            multipart_part_size_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -88,6 +103,8 @@ pub struct Config {
     /// `BUCKET` from `~/.s3b/s3b.aws`, if present. Used as the fallback
     /// target bucket when `-bucket` isn't given -- see `resolve_bucket`.
     pub bucket: Option<String>,
+    pub multipart_threshold_bytes: u64,
+    pub multipart_part_size_bytes: u64,
 }
 
 fn env_first(names: &[&str]) -> Option<String> {
@@ -244,6 +261,8 @@ impl Config {
             aws_secret_access_key,
             aws_session_token,
             bucket,
+            multipart_threshold_bytes: file_cfg.multipart_threshold_bytes,
+            multipart_part_size_bytes: file_cfg.multipart_part_size_bytes,
         })
     }
 
@@ -306,6 +325,8 @@ mod tests {
         // a Unix-only literal path.
         assert!(d.temp_dir.ends_with("s3b"));
         assert_eq!(d.retry_attempts, 3);
+        assert_eq!(d.multipart_threshold_bytes, 8 * 1024 * 1024);
+        assert_eq!(d.multipart_part_size_bytes, 8 * 1024 * 1024);
     }
 
     #[test]
