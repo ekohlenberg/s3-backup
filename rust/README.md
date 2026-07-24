@@ -70,6 +70,13 @@ username = "eric"        # override; defaults to $USER
 (covers macOS, which doesn't populate `/etc/hostname`). `username` comes
 from this config field, then `$USER` / `%USERNAME%`.
 
+## Logging
+
+Every run writes its log lines to `~/.s3b/s3b.log`
+(`%USERPROFILE%\.s3b\s3b.log` on Windows) in addition to the console. The
+file is overwritten at the start of each run -- only the most recent
+session's log is kept, there's no rotation or accumulation across runs.
+
 ### Platform notes
 
 - `temp_dir` defaults to the OS temp directory (`$TMPDIR`/`/tmp` on
@@ -124,5 +131,5 @@ This follows the migration plan agreed for this port:
 | `src/naming.rs` | Object key naming convention |
 | `src/manifest.rs` | Bucket-resident `_s3b/manifest.json` |
 | `src/s3/` | Hand-rolled SigV4-signed S3 client (PUT/GET/HEAD/List) |
-| `src/logging.rs` | Minimal timestamped logger + run summary |
-| `src/time_util.rs` | Dependency-free UTC date/time formatting |
+| `src/logging.rs` | Minimal local-time-timestamped logger (console + `~/.s3b/s3b.log`) + run summary |
+| `src/time_util.rs` | Dependency-free UTC + local date/time formatting |

@@ -22,6 +22,15 @@ mod time_util;
 use error::AppError;
 
 fn main() {
+    // Opens (truncating) ~/.s3b/s3b.log for this session before any other
+    // logging happens, so every logging::info/warn/error call below --
+    // including one from a caught panic -- is mirrored to the file, not
+    // just the console. (Usage errors print the raw USAGE block directly to
+    // stderr rather than going through the logger, so those aren't
+    // mirrored -- consistent with them already being a distinct kind of
+    // output, not a timestamped log line.)
+    logging::init();
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // Exceptions are logged, not rethrown to the shell (requirement 2): a
