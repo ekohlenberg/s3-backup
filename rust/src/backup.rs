@@ -245,7 +245,14 @@ fn process_folder(
             String::new()
         }
     ));
-    let upload_result = client.upload_object(&object_key, &ciphertext, &metadata, threshold, part_size);
+    let upload_result = client.upload_object(
+        &object_key,
+        &ciphertext,
+        &metadata,
+        threshold,
+        part_size,
+        cfg.multipart_part_retry_attempts,
+    );
 
     // Clean up local temp files regardless of upload outcome -- the
     // archive/tar temp file cleanup is intentional (per requirement 4.5);

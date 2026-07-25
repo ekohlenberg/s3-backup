@@ -64,6 +64,16 @@ pub struct FileConfig {
     /// independently-retriable requests (useful on flaky networks) at the
     /// cost of more round-trips.
     pub multipart_part_size_bytes: u64,
+
+    /// How many additional attempts each individual network call in a
+    /// multipart upload gets beyond the first (each part upload, plus the
+    /// create/complete calls bookending them), with exponential backoff
+    /// between attempts. Kept separate from `retry_attempts` (which retries
+    /// a whole folder -- a full re-archive/re-encrypt/re-upload) since a
+    /// single part is cheap to retry and a large upload makes enough
+    /// requests that some of them failing transiently is expected, not
+    /// exceptional.
+    pub multipart_part_retry_attempts: u32,
 }
 
 impl Default for FileConfig {
@@ -85,6 +95,7 @@ impl Default for FileConfig {
             username: None,
             multipart_threshold_bytes: 8 * 1024 * 1024,
             multipart_part_size_bytes: 8 * 1024 * 1024,
+            multipart_part_retry_attempts: 5,
         }
     }
 }
@@ -105,6 +116,7 @@ pub struct Config {
     pub bucket: Option<String>,
     pub multipart_threshold_bytes: u64,
     pub multipart_part_size_bytes: u64,
+    pub multipart_part_retry_attempts: u32,
 }
 
 fn env_first(names: &[&str]) -> Option<String> {
@@ -263,6 +275,7 @@ impl Config {
             bucket,
             multipart_threshold_bytes: file_cfg.multipart_threshold_bytes,
             multipart_part_size_bytes: file_cfg.multipart_part_size_bytes,
+            multipart_part_retry_attempts: file_cfg.multipart_part_retry_attempts,
         })
     }
 
@@ -348,6 +361,7 @@ mod tests {
         assert_eq!(d.retry_attempts, 3);
         assert_eq!(d.multipart_threshold_bytes, 8 * 1024 * 1024);
         assert_eq!(d.multipart_part_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(d.multipart_part_retry_attempts, 5);
     }
 
     #[test]
@@ -433,6 +447,7 @@ mod tests {
             bucket: None,
             multipart_threshold_bytes: 8 * 1024 * 1024,
             multipart_part_size_bytes: 8 * 1024 * 1024,
+            multipart_part_retry_attempts: 5,
         }
     }
 

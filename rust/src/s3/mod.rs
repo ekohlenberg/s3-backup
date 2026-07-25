@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::hashing;
+use crate::logging::warn;
 use crate::time_util::amz_date_now;
 
 pub struct PutResult {
@@ -90,9 +91,21 @@ impl S3Client {
             }
         };
 
+        // `max_idle_connections_per_host(0)` disables ureq's connection
+        // pooling/reuse for this agent (default is 1 idle connection kept
+        // per host). A large multipart upload makes hundreds to thousands
+        // of sequential requests to the same host; some Windows AV/firewall
+        // "network protection" modules single out long-lived reused
+        // connections and kill them after enough traffic passes through --
+        // exactly the `os error 10053` transport errors seen testing large
+        // uploads. Opening a fresh TCP+TLS connection per request costs a
+        // bit of latency but sidesteps that heuristic entirely; combined
+        // with the retry logic in `upload_object`, a single connection kill
+        // now costs one retried request instead of the whole upload.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
             .timeout(Duration::from_secs(300))
+            .max_idle_connections_per_host(0)
             .build();
 
         S3Client {
@@ -239,6 +252,17 @@ impl S3Client {
     /// request, so a single aborted part costs a retry of that part, not
     /// the whole file, and each request is small enough to usually finish
     /// before whatever is killing long-lived connections gets the chance.
+    ///
+    /// `part_retry_attempts` is how many *additional* attempts each
+    /// individual network call in this path gets beyond the first (applied
+    /// to every part upload and to the create/complete calls that bookend
+    /// them) -- with a large file split into hundreds or thousands of
+    /// parts, even a low per-request failure rate becomes likely to hit
+    /// *something* over the whole upload if no single request gets a second
+    /// try, so retrying at the part level (cheap: one part, not the whole
+    /// file) rather than only at the whole-folder level (expensive: a full
+    /// re-archive/re-encrypt/re-upload from byte zero) is what actually
+    /// makes very large uploads reliable.
     pub fn upload_object(
         &self,
         key: &str,
@@ -246,15 +270,20 @@ impl S3Client {
         metadata: &[(&str, &str)],
         threshold: usize,
         part_size: usize,
+        part_retry_attempts: u32,
     ) -> Result<PutResult, AppError> {
         if body.len() <= threshold {
             return self.put_object(key, body, metadata);
         }
 
         let part_size = part_size.max(MIN_MULTIPART_PART_SIZE);
-        let upload_id = self.create_multipart_upload(key, metadata)?;
+        let max_attempts = part_retry_attempts.saturating_add(1);
 
-        match self.upload_parts_and_complete(key, &upload_id, body, part_size) {
+        let upload_id = with_retry(max_attempts, &format!("create-multipart-upload for {key}"), || {
+            self.create_multipart_upload(key, metadata)
+        })?;
+
+        match self.upload_parts_and_complete(key, &upload_id, body, part_size, max_attempts) {
             Ok(result) => Ok(result),
             Err(e) => {
                 // Best-effort cleanup so a failed upload doesn't leave
@@ -274,13 +303,24 @@ impl S3Client {
         upload_id: &str,
         body: &[u8],
         part_size: usize,
+        max_attempts: u32,
     ) -> Result<PutResult, AppError> {
         let mut parts = Vec::new();
         for (i, chunk) in body.chunks(part_size).enumerate() {
             let part_number = (i + 1) as u32;
-            parts.push(self.upload_part(key, upload_id, part_number, chunk)?);
+            let part = with_retry(
+                max_attempts,
+                &format!("upload of part {part_number} of {key}"),
+                || self.upload_part(key, upload_id, part_number, chunk),
+            )?;
+            parts.push(part);
         }
-        self.complete_multipart_upload(key, upload_id, &parts)
+
+        with_retry(
+            max_attempts,
+            &format!("complete-multipart-upload for {key}"),
+            || self.complete_multipart_upload(key, upload_id, &parts),
+        )
     }
 
     /// Starts a multipart upload, returning the upload ID S3 assigns. Object
@@ -476,6 +516,47 @@ impl S3Client {
 
         Ok(all)
     }
+}
+
+/// Retries `op` up to `max_attempts` times (at least 1), with exponential
+/// backoff between attempts (2s, 4s, 8s, 16s, 32s, then capped at 32s),
+/// returning the first success or the last error if every attempt fails.
+///
+/// Used for every network call in the multipart upload path. The
+/// motivating failure: a ~10 GB upload split into ~1,250 parts still hit a
+/// transport-level connection abort around part 700, and because nothing
+/// retried at the part level, that one failed request discarded all 700
+/// already-uploaded parts and forced the whole folder to restart from a
+/// fresh re-archive/re-encrypt. With even a small per-request failure
+/// probability, a sequence of a thousand-plus requests is likely to hit
+/// *something* eventually -- so requests need their own retry budget, not
+/// just the whole file.
+fn with_retry<T>(
+    max_attempts: u32,
+    description: &str,
+    mut op: impl FnMut() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let attempts = max_attempts.max(1);
+    let mut last_err = None;
+
+    for attempt in 1..=attempts {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt < attempts {
+                    let backoff = Duration::from_secs(2u64.saturating_pow(attempt.min(5)));
+                    warn(format!(
+                        "{description} failed (attempt {attempt}/{attempts}): {e} -- retrying in {}s",
+                        backoff.as_secs()
+                    ));
+                    std::thread::sleep(backoff);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.expect("loop runs at least once, so last_err is always set on the error path"))
 }
 
 /// Independently recomputes the composite checksum S3 reports for a
