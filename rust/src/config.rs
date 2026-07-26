@@ -288,25 +288,63 @@ impl Config {
         resolve_bucket_from(explicit, self.bucket.as_deref())
     }
 
-    /// Wipes the temp directory clean, then recreates it empty. Called once
-    /// at startup, before any backup/restore/test work begins.
+    /// The `restore/` subfolder is the one exception to `reset_temp_dir`'s
+    /// wipe: `-action restore`'s finished, expanded output for each object
+    /// lives here rather than directly under `temp_dir`, specifically so it
+    /// survives across runs. That's what lets a rerun after a partial
+    /// restore failure (a dropped connection, a DNS blip) skip objects that
+    /// already finished instead of re-downloading and re-expanding
+    /// everything from scratch -- see `restore::restore_one`.
+    pub const RESTORE_SUBDIR: &'static str = "restore";
+
+    /// `<temp_dir>/restore` -- see `RESTORE_SUBDIR`.
+    pub fn restore_dir(&self) -> PathBuf {
+        self.temp_dir.join(Self::RESTORE_SUBDIR)
+    }
+
+    /// Wipes everything directly under the temp directory *except* the
+    /// `restore/` subfolder, then ensures both it and `restore/` exist.
+    /// Called once at startup, before any backup/restore/test work begins.
     ///
-    /// `temp_dir` is pure scratch space: intermediate archive/compress/
-    /// encrypt files during backup, downloaded/decrypted/expanded files
-    /// during restore and test. There's no resumable mid-pipeline state
-    /// (per the migration notes), so nothing in it is meant to survive
-    /// between runs -- but a killed or crashed previous run can still leave
-    /// partial `.tmp`/`.enc` files or expanded folders behind, and starting
-    /// the next run on top of that residue risks confusing output rather
-    /// than a clean rerun. Always starting from an empty directory removes
-    /// that risk entirely.
+    /// `temp_dir` is otherwise pure scratch space: intermediate archive/
+    /// compress/encrypt files during backup, and the downloaded/decrypted
+    /// tarball plus test's expanded output during restore/test. There's no
+    /// resumable mid-pipeline state for any of that (per the migration
+    /// notes), so nothing outside `restore/` is meant to survive between
+    /// runs -- but a killed or crashed previous run can still leave partial
+    /// `.tmp`/`.enc` files or expanded folders behind, and starting the next
+    /// run on top of that residue risks confusing output rather than a
+    /// clean rerun. Always starting from an empty scratch area removes that
+    /// risk entirely, without touching the one thing (`restore/`) that's
+    /// deliberately meant to persist.
     pub fn reset_temp_dir(&self) -> Result<(), AppError> {
-        match std::fs::remove_dir_all(&self.temp_dir) {
-            Ok(()) => {}
+        match std::fs::read_dir(&self.temp_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| AppError::io(&self.temp_dir, e))?;
+                    if entry.file_name() == Self::RESTORE_SUBDIR {
+                        continue;
+                    }
+                    let path = entry.path();
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    let remove_result = if is_dir {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    if let Err(e) = remove_result {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            return Err(AppError::io(&path, e));
+                        }
+                    }
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(AppError::io(&self.temp_dir, e)),
         }
-        std::fs::create_dir_all(&self.temp_dir).map_err(|e| AppError::io(&self.temp_dir, e))
+        std::fs::create_dir_all(&self.temp_dir).map_err(|e| AppError::io(&self.temp_dir, e))?;
+        let restore_dir = self.restore_dir();
+        std::fs::create_dir_all(&restore_dir).map_err(|e| AppError::io(&restore_dir, e))
     }
 }
 
@@ -475,6 +513,32 @@ mod tests {
         cfg.reset_temp_dir().unwrap();
 
         assert!(temp_dir.is_dir());
+        assert!(cfg.restore_dir().is_dir(), "restore/ should be created too");
+    }
+
+    #[test]
+    fn reset_temp_dir_preserves_restore_subfolder_but_wipes_everything_else() {
+        let base = tempfile::tempdir().unwrap();
+        let temp_dir = base.path().join("s3b-temp");
+        let cfg = test_config(temp_dir.clone());
+
+        // Prior restore output that must survive.
+        let restored_object_dir = cfg.restore_dir().join("host_user_Documents");
+        std::fs::create_dir_all(&restored_object_dir).unwrap();
+        std::fs::write(restored_object_dir.join("file.txt"), b"restored content").unwrap();
+        std::fs::write(cfg.restore_dir().join(".s3b-restore-complete"), b"deadbeef").unwrap();
+
+        // Ordinary scratch residue that must not survive.
+        std::fs::write(temp_dir.join("some.tar.gz.tmp"), b"scratch").unwrap();
+
+        cfg.reset_temp_dir().unwrap();
+
+        assert_eq!(
+            std::fs::read(restored_object_dir.join("file.txt")).unwrap(),
+            b"restored content",
+            "previously restored output must survive reset_temp_dir"
+        );
+        assert!(!temp_dir.join("some.tar.gz.tmp").exists(), "non-restore scratch files must still be wiped");
     }
 
     #[test]

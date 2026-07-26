@@ -112,9 +112,14 @@ fn run(argv: &[String]) -> i32 {
         }
         cli::Action::Restore => {
             // -key is optional -- resolve_private_key_path falls back to
-            // ~/.s3b/s3b.key when it's omitted.
-            crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new))
-                .and_then(|key_path| restore::run(&cfg, &bucket, args.object.as_deref(), &key_path))
+            // ~/.s3b/s3b.key when it's omitted. -force bypasses the
+            // already-restored skip check in restore::run (see
+            // restore::restore_one), forcing every object to be
+            // re-downloaded/re-decrypted/re-expanded regardless of prior
+            // runs.
+            crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new)).and_then(
+                |key_path| restore::run(&cfg, &bucket, args.object.as_deref(), &key_path, args.force),
+            )
         }
         cli::Action::Test => {
             // Same -key resolution as Restore; test always covers every

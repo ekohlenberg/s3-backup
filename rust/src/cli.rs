@@ -53,9 +53,11 @@ const BOOLEAN_FLAGS: &[&str] = &["force"];
 /// - `backup` requires `-folder`; `-bucket` and `-force` are optional --
 ///   `-bucket` falls back to `BUCKET=<name>` in `~/.s3b/s3b.aws`
 ///   (`config::Config::resolve_bucket`)
-/// - `restore` has no required flags -- `-bucket`, `-key`, and `-object` are
-///   all optional; `-bucket` falls back the same way as for `backup`, and
-///   `-key` falls back to `~/.s3b/s3b.key` (`crypto::resolve_private_key_path`)
+/// - `restore` has no required flags -- `-bucket`, `-key`, `-object`, and
+///   `-force` are all optional; `-bucket` falls back the same way as for
+///   `backup`, `-key` falls back to `~/.s3b/s3b.key`
+///   (`crypto::resolve_private_key_path`), and `-force` bypasses the
+///   already-restored skip check in `restore::run` (see `restore::restore_one`)
 /// - `test` has no required flags either -- `-bucket` and `-key` resolve the
 ///   same way as for `restore`; there's no `-object` since test always
 ///   covers every object in the bucket
