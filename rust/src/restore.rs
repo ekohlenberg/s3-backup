@@ -286,7 +286,18 @@ fn restore_object(
 ) -> Result<(), AppError> {
     let base = naming::base_name_from_object_key(key).unwrap_or_else(|| key.replace('/', "_"));
 
-    let ciphertext = client.get_object(key)?;
+    // Chunked + per-chunk-retried above cfg.multipart_threshold_bytes -- see
+    // S3Client::download_object. This is what makes restoring a large media
+    // folder (many GiB in one object) survive a connection that can't stay
+    // open for the whole transfer: each chunk is small enough to reliably
+    // finish, and only the interrupted chunk gets retried, not the whole
+    // object from byte zero.
+    let ciphertext = client.download_object(
+        key,
+        cfg.multipart_threshold_bytes as usize,
+        cfg.multipart_part_size_bytes as usize,
+        cfg.multipart_part_retry_attempts,
+    )?;
     let plaintext = crypto::decrypt(&ciphertext, private_key)?;
 
     let tar_gz_path = cfg.temp_dir.join(format!("{base}.restore.tar.gz.tmp"));

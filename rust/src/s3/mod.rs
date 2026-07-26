@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::hashing;
-use crate::logging::warn;
+use crate::logging::{info, warn};
 use crate::time_util::amz_date_now;
 
 pub struct PutResult {
@@ -452,6 +452,89 @@ impl S3Client {
         Ok(buf)
     }
 
+    /// Downloads `key`, transparently switching from a single GET to ranged,
+    /// chunked GETs once the object exceeds `threshold` bytes (split into
+    /// `part_size`-byte ranges) -- the download-side mirror of
+    /// `upload_object`'s multipart path, reusing the same threshold/part-size/
+    /// retry config fields since the underlying motivation is identical.
+    ///
+    /// A single GET held open for a multi-gigabyte object (a large media
+    /// folder, for instance) has to survive without a stall for as long as
+    /// the whole transfer takes; the longer a connection stays open, the
+    /// more likely *something* on the path (a flaky wifi link, a firewall
+    /// idling out a long-lived connection, a transient AWS-side hiccup)
+    /// interrupts it, and a plain GET has no way to resume or retry
+    /// partway through -- the whole object has to restart from byte zero.
+    /// Chunking makes each request small enough to reliably finish and
+    /// cheap enough to retry on its own: with `with_retry`'s backoff on each
+    /// range, one interrupted chunk costs a retry of that chunk, not the
+    /// whole download.
+    ///
+    /// Every request goes through the same connection-pooling-disabled
+    /// agent `S3Client::new` builds, so this also gets the "fresh TCP+TLS
+    /// connection per request" mitigation already in place for uploads.
+    pub fn download_object(
+        &self,
+        key: &str,
+        threshold: usize,
+        part_size: usize,
+        part_retry_attempts: u32,
+    ) -> Result<Vec<u8>, AppError> {
+        let max_attempts = part_retry_attempts.saturating_add(1);
+
+        // HEAD first so the size is known up front: it decides single-shot
+        // vs. chunked, and the final assembled length is checked against it
+        // below as a cheap sanity check (decryption's AEAD tag would catch a
+        // truncated/corrupt result regardless, but failing here gives a much
+        // clearer error message than an opaque crypto failure downstream).
+        let size = self.head_object(key)?.ok_or(AppError::S3NotFound)?.size;
+
+        if (size as usize) <= threshold {
+            return with_retry(max_attempts, &format!("download of {key}"), || self.get_object(key));
+        }
+
+        let part_size = part_size.max(1);
+        info(format!(
+            "{key} is {size} bytes (over the {threshold}-byte threshold) -- downloading in ~{part_size}-byte ranged chunks"
+        ));
+
+        let mut buf = Vec::with_capacity(size as usize);
+        for (start, end) in chunk_ranges(size, part_size as u64) {
+            let chunk = with_retry(
+                max_attempts,
+                &format!("download of bytes {start}-{end} of {key}"),
+                || self.get_object_range(key, start, end),
+            )?;
+            buf.extend_from_slice(&chunk);
+        }
+
+        if buf.len() as u64 != size {
+            return Err(AppError::S3(format!(
+                "downloaded {} bytes for {key}, expected {size} (from HEAD's Content-Length) -- \
+                 the object may have changed mid-download",
+                buf.len()
+            )));
+        }
+
+        Ok(buf)
+    }
+
+    /// Fetches the inclusive byte range `[start, end]` of `key` via an HTTP
+    /// `Range` request. Used only by `download_object`'s chunked path.
+    fn get_object_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, AppError> {
+        let uri = self.object_uri(key);
+        let mut extra = BTreeMap::new();
+        extra.insert("range".to_string(), format!("bytes={start}-{end}"));
+        let resp = self.execute("GET", &uri, &BTreeMap::new(), extra, &[])?;
+        let mut buf = Vec::new();
+        resp.into_reader().read_to_end(&mut buf).map_err(|e| {
+            AppError::S3(format!(
+                "reading response body for {key} (range {start}-{end}): {e}"
+            ))
+        })?;
+        Ok(buf)
+    }
+
     /// Returns `Ok(None)` on a 404 (object does not exist yet -- this is the
     /// normal "never backed up before" case, not an error).
     pub fn head_object(&self, key: &str) -> Result<Option<ObjectMetadata>, AppError> {
@@ -566,6 +649,25 @@ fn with_retry<T>(
 /// for any multipart object, mirroring the long-standing ETag `-<part_count>`
 /// convention. Verified against AWS's own documented worked example in
 /// `mod.rs` tests below.
+/// Splits `size` bytes into inclusive `(start, end)` byte ranges of at most
+/// `part_size` bytes each, for `download_object`'s chunked GET path. Pure
+/// and network-free so the chunking math is directly unit-testable without
+/// a mock server.
+fn chunk_ranges(size: u64, part_size: u64) -> Vec<(u64, u64)> {
+    if size == 0 {
+        return Vec::new();
+    }
+    let part_size = part_size.max(1);
+    let mut ranges = Vec::new();
+    let mut offset = 0u64;
+    while offset < size {
+        let end = (offset + part_size - 1).min(size - 1);
+        ranges.push((offset, end));
+        offset = end + 1;
+    }
+    ranges
+}
+
 fn composite_sha256_checksum(parts: &[xml::CompletedPart]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use sha2::{Digest, Sha256};
@@ -613,6 +715,33 @@ mod tests {
             composite_sha256_checksum(&parts),
             "aI8EoktCdotjU8Bq46DrPCxQCGuGcPIhJ51noWs6hvk=-3"
         );
+    }
+
+    #[test]
+    fn chunk_ranges_splits_into_part_sized_pieces() {
+        assert_eq!(chunk_ranges(10, 3), vec![(0, 2), (3, 5), (6, 8), (9, 9)]);
+    }
+
+    #[test]
+    fn chunk_ranges_exact_multiple_of_part_size() {
+        assert_eq!(chunk_ranges(9, 3), vec![(0, 2), (3, 5), (6, 8)]);
+    }
+
+    #[test]
+    fn chunk_ranges_single_range_when_object_smaller_than_part_size() {
+        assert_eq!(chunk_ranges(5, 100), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn chunk_ranges_empty_object_has_no_ranges() {
+        assert_eq!(chunk_ranges(0, 100), Vec::<(u64, u64)>::new());
+    }
+
+    #[test]
+    fn chunk_ranges_zero_part_size_treated_as_one() {
+        // Defensive: a misconfigured part size of 0 must not loop forever or
+        // divide by zero -- it degrades to one byte per range instead.
+        assert_eq!(chunk_ranges(2, 0), vec![(0, 0), (1, 1)]);
     }
 }
 

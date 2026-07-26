@@ -53,26 +53,30 @@ pub struct FileConfig {
     pub username: Option<String>,
 
     /// Size threshold (bytes) above which an upload switches from a single
-    /// PUT to S3 multipart upload, split into `multipart_part_size_bytes`
-    /// parts. Defaults to the AWS CLI's own multipart threshold, so
-    /// small-file behavior doesn't change from a plain PUT.
+    /// PUT to S3 multipart upload (split into `multipart_part_size_bytes`
+    /// parts), and a restore download switches from a single GET to ranged,
+    /// chunked GETs of the same part size (`S3Client::download_object`).
+    /// Defaults to the AWS CLI's own multipart threshold, so small-file
+    /// behavior doesn't change from a plain PUT/GET.
     pub multipart_threshold_bytes: u64,
 
-    /// Size (bytes) of each part when a multipart upload is used. S3
-    /// requires at least 5 MiB for every part but the last and allows at
-    /// most 10,000 parts per object; smaller parts mean more, smaller,
-    /// independently-retriable requests (useful on flaky networks) at the
-    /// cost of more round-trips.
+    /// Size (bytes) of each part/chunk once an upload or restore download
+    /// crosses `multipart_threshold_bytes`. S3 requires at least 5 MiB for
+    /// every upload part but the last and allows at most 10,000 parts per
+    /// object (no such limit applies to GET ranges); smaller parts mean
+    /// more, smaller, independently-retriable requests (useful on flaky
+    /// networks) at the cost of more round-trips.
     pub multipart_part_size_bytes: u64,
 
-    /// How many additional attempts each individual network call in a
-    /// multipart upload gets beyond the first (each part upload, plus the
-    /// create/complete calls bookending them), with exponential backoff
-    /// between attempts. Kept separate from `retry_attempts` (which retries
-    /// a whole folder -- a full re-archive/re-encrypt/re-upload) since a
-    /// single part is cheap to retry and a large upload makes enough
-    /// requests that some of them failing transiently is expected, not
-    /// exceptional.
+    /// How many additional attempts each individual network call gets
+    /// beyond the first -- each upload part (plus the create/complete calls
+    /// bookending a multipart upload), or each ranged GET chunk during a
+    /// large restore download -- with exponential backoff between attempts.
+    /// Kept separate from `retry_attempts` (which retries a whole
+    /// folder/object -- a full re-archive/re-encrypt/re-upload, or a full
+    /// re-download) since a single part/chunk is cheap to retry and a large
+    /// transfer makes enough requests that some of them failing transiently
+    /// is expected, not exceptional.
     pub multipart_part_retry_attempts: u32,
 }
 
@@ -501,7 +505,16 @@ mod tests {
         cfg.reset_temp_dir().unwrap();
 
         assert!(temp_dir.is_dir());
-        assert_eq!(std::fs::read_dir(&temp_dir).unwrap().count(), 0);
+        // reset_temp_dir always ensures restore/ exists (see
+        // reset_temp_dir_preserves_restore_subfolder_but_wipes_everything_else),
+        // so that's the one entry expected to remain -- everything else
+        // (the stray leftover/ dir and another.tmp file) must be gone.
+        let remaining: Vec<_> = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(remaining, vec![std::ffi::OsString::from(Config::RESTORE_SUBDIR)]);
+        assert_eq!(std::fs::read_dir(cfg.restore_dir()).unwrap().count(), 0, "restore/ itself should be empty");
     }
 
     #[test]
