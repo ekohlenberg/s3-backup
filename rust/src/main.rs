@@ -22,6 +22,15 @@ mod time_util;
 use error::AppError;
 
 fn main() {
+    // Opens (truncating) ~/.s3b/s3b.log for this session before any other
+    // logging happens, so every logging::info/warn/error call below --
+    // including one from a caught panic -- is mirrored to the file, not
+    // just the console. (Usage errors print the raw USAGE block directly to
+    // stderr rather than going through the logger, so those aren't
+    // mirrored -- consistent with them already being a distinct kind of
+    // output, not a timestamped log line.)
+    logging::init();
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // Exceptions are logged, not rethrown to the shell (requirement 2): a
@@ -51,8 +60,44 @@ fn run(argv: &[String]) -> i32 {
         }
     };
 
+    // genkey needs neither a loaded Config (no AWS credentials, no public
+    // key -- it's what *creates* the public key) nor a bucket, so it's
+    // handled before Config::load rather than folded into the match below.
+    if args.action == cli::Action::Genkey {
+        // -out is optional; when omitted, crypto::genkey resolves the
+        // default itself (~/.s3b/s3b, creating ~/.s3b if needed) -- the same
+        // location backup/restore fall back to when S3BPUBKEY/-key are unset.
+        return match crypto::genkey(args.out.as_deref()) {
+            Ok(()) => 0,
+            Err(e) => {
+                logging::error(format!("{e}"));
+                1
+            }
+        };
+    }
+
     let cfg = match config::Config::load(args.config_path.as_deref()) {
         Ok(c) => c,
+        Err(e) => {
+            logging::error(format!("{e}"));
+            return 1;
+        }
+    };
+
+    // Wipe the temp directory clean before any other work happens, so any
+    // residue left behind by a killed or crashed previous run (partial
+    // .tmp/.enc files, expanded folders from an interrupted restore/test)
+    // never leaks into this run. See Config::reset_temp_dir.
+    if let Err(e) = cfg.reset_temp_dir() {
+        logging::error(format!("{e}"));
+        return 1;
+    }
+
+    // -bucket is optional on the CLI; resolve it once here (falls back to
+    // BUCKET=<name> in ~/.s3b/s3b.aws, loaded into cfg.bucket by
+    // Config::load) since both remaining actions need it.
+    let bucket = match cfg.resolve_bucket(args.bucket.as_deref()) {
+        Ok(b) => b,
         Err(e) => {
             logging::error(format!("{e}"));
             return 1;
@@ -63,9 +108,26 @@ fn run(argv: &[String]) -> i32 {
         cli::Action::Backup => {
             // Validated by cli::parse: -folder is required for backup.
             let folder = args.folder.as_deref().expect("cli::parse enforces -folder for backup");
-            backup::run(&cfg, folder, &args.bucket)
+            backup::run(&cfg, folder, &bucket, args.force)
         }
-        cli::Action::Restore => restore::run(&cfg, &args.bucket, args.object.as_deref()),
+        cli::Action::Restore => {
+            // -key is optional -- resolve_private_key_path falls back to
+            // ~/.s3b/s3b.key when it's omitted. -force bypasses the
+            // already-restored skip check in restore::run (see
+            // restore::restore_one), forcing every object to be
+            // re-downloaded/re-decrypted/re-expanded regardless of prior
+            // runs.
+            crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new)).and_then(
+                |key_path| restore::run(&cfg, &bucket, args.object.as_deref(), &key_path, args.force),
+            )
+        }
+        cli::Action::Test => {
+            // Same -key resolution as Restore; test always covers every
+            // object in the bucket, so there's no -object to pass through.
+            crypto::resolve_private_key_path(args.key.as_deref().map(std::path::Path::new))
+                .and_then(|key_path| restore::run_test(&cfg, &bucket, &key_path))
+        }
+        cli::Action::Genkey => unreachable!("genkey is handled above, before Config::load"),
     };
 
     match result {

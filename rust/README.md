@@ -24,20 +24,34 @@ nothing platform-specific to install first.
 ## Usage
 
 ```
-s3b -action backup  -folder <backup_folder> -bucket <s3_bucket>
-s3b -action restore -bucket <s3_bucket> [-object <object>]
+s3b -action backup  -folder <backup_folder> [-bucket <s3_bucket>] [-force]
+s3b -action restore [-bucket <s3_bucket>] [-key <private_key_file>] [-object <object>]
+s3b -action genkey  [-out <key_prefix>]
 ```
 
-Required environment variables:
+`-bucket` and `-key` are optional -- see the fallback files below.
 
-- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optionally
-  `AWS_SESSION_TOKEN`) -- S3 credentials.
-- `S3BPASSFILE` (or `S3B-PASSFILE`) -- path to a file whose contents are used
-  as the encryption passphrase.
+Required, from the environment or `~/.s3b/s3b.aws`:
 
-Optional environment variables:
+- `AWS_ACCESS_KEY_ID` (or the shorter `AWS_ACCESS_KEY`), `AWS_SECRET_ACCESS_KEY`
+  -- S3 credentials. `AWS_SESSION_TOKEN` is read from the environment only.
+
+Optional, from the environment or `~/.s3b/s3b.aws`:
 
 - `AWS_REGION` / `AWS_DEFAULT_REGION` -- defaults to `us-east-1`.
+
+`~/.s3b/s3b.aws` (`%USERPROFILE%\.s3b\s3b.aws` on Windows) is a fallback file
+for anything not set in the environment or on the command line, `key=value`
+per line:
+
+```
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+BUCKET=my-bucket
+```
+
+`BUCKET` there is used whenever `-bucket` is omitted on the command line.
 
 Optional config file (TOML), path via `-config <path>`, or `./s3b.toml` if
 present:
@@ -55,6 +69,13 @@ username = "eric"        # override; defaults to $USER
 `%COMPUTERNAME%`, `/etc/hostname` (Linux), then the `hostname` command
 (covers macOS, which doesn't populate `/etc/hostname`). `username` comes
 from this config field, then `$USER` / `%USERNAME%`.
+
+## Logging
+
+Every run writes its log lines to `~/.s3b/s3b.log`
+(`%USERPROFILE%\.s3b\s3b.log` on Windows) in addition to the console. The
+file is overwritten at the start of each run -- only the most recent
+session's log is kept, there's no rotation or accumulation across runs.
 
 ### Platform notes
 
@@ -106,9 +127,9 @@ This follows the migration plan agreed for this port:
 | `src/restore.rs` | Restore orchestration (list, download, decrypt, expand) |
 | `src/archive.rs` | Streaming tar+gzip archive / expand |
 | `src/crypto.rs` | Argon2id key derivation + AES-256-GCM encrypt/decrypt |
-| `src/hashing.rs` | Folder content-hash + MD5 (ETag verification) |
+| `src/hashing.rs` | Folder content-hash + SHA-256 (upload checksum verification) |
 | `src/naming.rs` | Object key naming convention |
 | `src/manifest.rs` | Bucket-resident `_s3b/manifest.json` |
 | `src/s3/` | Hand-rolled SigV4-signed S3 client (PUT/GET/HEAD/List) |
-| `src/logging.rs` | Minimal timestamped logger + run summary |
-| `src/time_util.rs` | Dependency-free UTC date/time formatting |
+| `src/logging.rs` | Minimal local-time-timestamped logger (console + `~/.s3b/s3b.log`) + run summary |
+| `src/time_util.rs` | Dependency-free UTC + local date/time formatting |

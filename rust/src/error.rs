@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-pub const USAGE: &str = "s3b -action backup  -folder <backup_folder> -bucket <s3_bucket>\ns3b -action restore -bucket <s3_bucket> [-object <object>]";
+pub const USAGE: &str = "s3b -action backup  -folder <backup_folder> [-bucket <s3_bucket>] [-force]\ns3b -action restore [-bucket <s3_bucket>] [-key <private_key_file>] [-object <object>] [-force]\ns3b -action test    [-bucket <s3_bucket>] [-key <private_key_file>]\ns3b -action genkey  [-out <key_prefix>]\n\nbackup   reads the recipient's public key path from S3BPUBKEY (or S3B-PUBKEY),\n         falling back to ~/.s3b/s3b.pub if neither is set\nrestore  falls back to ~/.s3b/s3b.key if -key is omitted; each object's\n         expanded output persists at <temp_dir>/restore/<object> across\n         runs, so a rerun skips any object already restored and unchanged\n         (by source-hash) -- pass -force to redo every object anyway\ntest     downloads, decrypts, and decompresses every object in the bucket to\n         verify the restore pipeline works end to end, deleting each result\n         immediately after -- nothing is left in place; -key falls back to\n         ~/.s3b/s3b.key if omitted, same as restore\n-bucket  falls back to BUCKET=<name> in ~/.s3b/s3b.aws if omitted\nAWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION (env vars) fall back to\n         the matching key=value line in ~/.s3b/s3b.aws when not set in the\n         environment\n-force   backup: re-uploads every folder, bypassing the content-hash change\n         check; restore: re-downloads/re-expands every object, ignoring any\n         already-restored output\ngenkey   writes <key_prefix>.pub and <key_prefix>.key (prefix defaults to\n         ~/.s3b/s3b, creating ~/.s3b if needed)";
 
 /// Top-level application error. `Usage` errors print the usage string and
 /// exit 1; every other variant is logged and also exits 1 -- there is no
@@ -39,6 +39,9 @@ pub enum AppError {
 
     #[error("restore completed with {0} object(s) failing")]
     RestoreIncomplete(usize),
+
+    #[error("test completed with {0} object(s) failing")]
+    TestIncomplete(usize),
 }
 
 impl AppError {

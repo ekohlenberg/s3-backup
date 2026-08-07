@@ -7,13 +7,18 @@
 //!   manifest, not folder-level `LastWriteTime`.
 //! - There's no local database: "already backed up and current" is answered
 //!   by a HEAD request reading the previous run's `source-hash` metadata.
-//! - Upload verification is inline (via the PUT response's ETag), not a
+//! - Upload verification is inline (via a client-sent `x-amz-checksum-sha256`
+//!   digest that S3 validates and echoes back on the PUT response), not a
 //!   separate `aws s3 ls` reconciliation pass after the fact.
 //! - A folder is never considered backed up until verification succeeds --
 //!   fail closed, per the bulletproofing checklist.
+//! - `-force` bypasses the content-hash change check so every folder is
+//!   re-archived/re-encrypted/re-uploaded regardless of the recorded
+//!   `source-hash`, for cases like re-keying after `genkey` or wanting a
+//!   fresh verified copy without waiting for a real content change.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::archive;
 use crate::config::Config;
@@ -31,7 +36,7 @@ enum ProcessOutcome {
     Unchanged,
 }
 
-pub fn run(cfg: &Config, folder: &str, bucket: &str) -> Result<(), AppError> {
+pub fn run(cfg: &Config, folder: &str, bucket: &str, force: bool) -> Result<(), AppError> {
     let root = std::fs::canonicalize(folder).map_err(|e| AppError::io(folder, e))?;
     if !root.is_dir() {
         return Err(AppError::Config(format!(
@@ -42,8 +47,12 @@ pub fn run(cfg: &Config, folder: &str, bucket: &str) -> Result<(), AppError> {
 
     std::fs::create_dir_all(&cfg.temp_dir).map_err(|e| AppError::io(&cfg.temp_dir, e))?;
 
+    if force {
+        info("-force set: skipping the content-hash change check, re-uploading every folder");
+    }
+
     let client = S3Client::new(cfg, bucket);
-    let passphrase = crypto::read_passphrase(&cfg.passphrase_path)?;
+    let public_key = crypto::resolve_and_load_public_key()?;
     let mut manifest = Manifest::load(&client)?;
 
     // Immediate child directories (recursive scan each) plus the root
@@ -72,7 +81,7 @@ pub fn run(cfg: &Config, folder: &str, bucket: &str) -> Result<(), AppError> {
 
         let mut still_failing = Vec::new();
         for (path, recursive) in pending.drain(..) {
-            match process_folder(&client, cfg, &passphrase, &path, recursive) {
+            match process_folder(&client, cfg, &public_key, &path, recursive, force) {
                 Ok(ProcessOutcome::Uploaded) => {
                     info(format!("uploaded {}", path.display()));
                     summary.succeeded += 1;
@@ -127,24 +136,45 @@ pub fn run(cfg: &Config, folder: &str, bucket: &str) -> Result<(), AppError> {
 fn process_folder(
     client: &S3Client,
     cfg: &Config,
-    passphrase: &[u8],
+    public_key: &[u8; 32],
     folder: &Path,
     recursive: bool,
+    force: bool,
 ) -> Result<ProcessOutcome, AppError> {
     let folder_path_str = folder.to_string_lossy().to_string();
     let local_hash = hashing::hash_folder(folder, recursive)?;
     let object_key = naming::object_key(&cfg.hostname, &cfg.username, &folder_path_str);
 
-    if let Some(existing) = client.head_object(&object_key)? {
-        if existing.source_hash.as_deref() == Some(local_hash.as_str()) {
-            return Ok(ProcessOutcome::Unchanged);
+    // -force skips this entirely -- no HEAD request, no comparison -- so a
+    // forced run always re-archives/re-encrypts/re-uploads every folder.
+    if !force {
+        if let Some(existing) = client.head_object(&object_key)? {
+            if existing.source_hash.as_deref() == Some(local_hash.as_str()) {
+                return Ok(ProcessOutcome::Unchanged);
+            }
         }
     }
 
     // Archive + compress, streaming straight to a temp file (single
     // intermediate file, atomically renamed into place by `create_tar_gz`).
+    // The migration notes collapsed archive and compress into one in-process
+    // step (tar writes directly into the gzip encoder, no intermediate
+    // `.tar` file), so there's one log line for both rather than two that
+    // would imply a separate compress pass that doesn't actually happen.
     let tar_gz_path = cfg.temp_dir.join(format!("{object_key}.tar.gz.tmp"));
+    info(format!(
+        "archiving and compressing {} ({})",
+        folder.display(),
+        if recursive { "recursive" } else { "non-recursive" }
+    ));
+    let archive_start = Instant::now();
     archive::create_tar_gz(folder, recursive, &tar_gz_path)?;
+    let archived_bytes = std::fs::metadata(&tar_gz_path).map(|m| m.len()).unwrap_or(0);
+    info(format!(
+        "archived and compressed {} -> {archived_bytes} bytes ({:.1}s)",
+        folder.display(),
+        archive_start.elapsed().as_secs_f64()
+    ));
 
     let cleanup_tar_gz = |path: &Path| {
         if let Err(e) = std::fs::remove_file(path) {
@@ -163,13 +193,20 @@ fn process_folder(
         }
     };
 
-    let ciphertext = match crypto::encrypt(&plaintext, passphrase) {
+    info(format!("encrypting {} ({} bytes)", tar_gz_path.display(), plaintext.len()));
+    let encrypt_start = Instant::now();
+    let ciphertext = match crypto::encrypt(&plaintext, public_key) {
         Ok(ct) => ct,
         Err(e) => {
             cleanup_tar_gz(&tar_gz_path);
             return Err(e);
         }
     };
+    info(format!(
+        "encrypted -> {} bytes ({:.1}s)",
+        ciphertext.len(),
+        encrypt_start.elapsed().as_secs_f64()
+    ));
 
     // Persist the encrypted archive to disk too (atomic .tmp + rename)
     // before uploading, so a crash between encrypt and upload leaves a
@@ -195,7 +232,27 @@ fn process_folder(
         ("backup-time", backup_time.as_str()),
     ];
 
-    let upload_result = client.put_object(&object_key, &ciphertext, &metadata);
+    let threshold = cfg.multipart_threshold_bytes as usize;
+    let part_size = cfg.multipart_part_size_bytes as usize;
+    let multipart = ciphertext.len() > threshold;
+    info(format!(
+        "uploading {} -> {object_key} ({} bytes{})",
+        folder.display(),
+        ciphertext.len(),
+        if multipart {
+            format!(", multipart in ~{}-byte parts", part_size)
+        } else {
+            String::new()
+        }
+    ));
+    let upload_result = client.upload_object(
+        &object_key,
+        &ciphertext,
+        &metadata,
+        threshold,
+        part_size,
+        cfg.multipart_part_retry_attempts,
+    );
 
     // Clean up local temp files regardless of upload outcome -- the
     // archive/tar temp file cleanup is intentional (per requirement 4.5);
@@ -212,25 +269,48 @@ fn process_folder(
 
     let put_result = upload_result?;
 
-    // Verify before considering this folder backed up. Plain 32-hex-char
-    // ETags are the MD5 of the uploaded bytes for a single-part PUT with no
-    // server-side encryption; some S3-compatible providers or bucket-level
-    // SSE configurations return a different ETag shape we can't independently
-    // recompute, so we only *reject* on a definite mismatch and otherwise
-    // accept a non-empty ETag as confirmation the object exists.
-    if put_result.etag.len() == 32 && put_result.etag.chars().all(|c| c.is_ascii_hexdigit()) {
-        let expected = hashing::md5_hex(&ciphertext);
-        if put_result.etag != expected {
-            return Err(AppError::S3(format!(
-                "upload verification failed for {object_key}: expected ETag {expected}, got {}",
-                put_result.etag
-            )));
+    info(format!("verifying upload of {object_key}..."));
+
+    // Verify before considering this folder backed up. For a single PUT, we
+    // send a client-computed SHA-256 digest as `x-amz-checksum-sha256` (see
+    // `S3Client::put_object`), so S3 itself already rejected the request
+    // with an error -- caught by `upload_result?` above -- if the bytes it
+    // received didn't match; the check below is defense-in-depth confirming
+    // the digest S3 echoes back still matches what we sent, and fails
+    // closed if the provider didn't return one at all (e.g. an
+    // S3-compatible provider without checksum support), since in that case
+    // nothing has actually verified the upload.
+    //
+    // For a multipart upload, `put_result.verified` is already `true`:
+    // `S3Client::complete_multipart_upload` checked the composite checksum
+    // itself before returning, and that composite value isn't a plain
+    // whole-body SHA-256, so the comparison below doesn't apply to it.
+    if !put_result.verified {
+        match &put_result.checksum_sha256 {
+            Some(actual) => {
+                let expected = hashing::sha256_base64(&ciphertext);
+                if *actual != expected {
+                    return Err(AppError::S3(format!(
+                        "upload verification failed for {object_key}: expected SHA-256 checksum {expected}, got {actual}"
+                    )));
+                }
+            }
+            None => {
+                return Err(AppError::S3(format!(
+                    "upload verification failed for {object_key}: no x-amz-checksum-sha256 returned"
+                )));
+            }
         }
-    } else if put_result.etag.is_empty() {
-        return Err(AppError::S3(format!(
-            "upload verification failed for {object_key}: no ETag returned"
-        )));
     }
+
+    // ETag isn't used for verification (see above), but is logged as an
+    // audit-trail detail -- it's the identifier `aws s3api head-object` or
+    // the S3 console shows for this object, handy for cross-referencing a
+    // run's log output against the bucket after the fact.
+    info(format!(
+        "upload verified for {object_key} (ETag {})",
+        put_result.etag
+    ));
 
     Ok(ProcessOutcome::Uploaded)
 }
